@@ -124,6 +124,9 @@ namespace db {
 class commitlog;
 class config;
 class rp_handle;
+#ifndef FEATURE_10
+class data_listeners;
+#endif // FEATURE_10
 
 namespace system_keyspace {
 void make(database& db, bool durable, bool volatile_testing_only);
@@ -323,6 +326,9 @@ public:
         bool enable_metrics_reporting = false;
         db::large_partition_handler* large_partition_handler;
         db::timeout_semaphore* view_update_concurrency_semaphore;
+#ifndef FEATURE_10
+        db::data_listeners* data_listeners = nullptr;
+#endif // FEATURE_10
     };
     struct no_commitlog {};
     struct stats {
@@ -875,7 +881,11 @@ public:
         return _index_manager;
     }
 
+#ifndef FEATURE_10
+    db::large_partition_handler* get_large_partition_handler() const {
+#else
     db::large_partition_handler* get_large_partition_handler() {
+#endif // #ifndef FEATURE_10
         assert(_config.large_partition_handler);
         return _config.large_partition_handler;
     }
@@ -1112,7 +1122,11 @@ public:
      */
     locator::abstract_replication_strategy& get_replication_strategy();
     const locator::abstract_replication_strategy& get_replication_strategy() const;
+#ifndef FEATURE_5
+    column_family::config make_column_family_config(const schema& s, const database& db) const;
+#else
     column_family::config make_column_family_config(const schema& s, const db::config& db_config, db::large_partition_handler* lp_handler) const;
+#endif // FEATURE_5
     future<> make_directory_for_column_family(const sstring& name, utils::UUID uuid);
     void add_or_update_column_family(const schema_ptr& s) {
         _metadata->add_or_update_column_family(s);
@@ -1153,7 +1167,6 @@ public:
     no_such_column_family(const utils::UUID& uuid);
     no_such_column_family(const sstring& ks_name, const sstring& cf_name);
 };
-
 
 struct database_config {
     seastar::scheduling_group memtable_scheduling_group;
@@ -1258,6 +1271,13 @@ private:
 
     std::unique_ptr<db::large_partition_handler> _large_partition_handler;
 
+#ifndef FEATURE_10
+    query::result_memory_limiter _result_memory_limiter;
+
+    friend db::data_listeners;
+    std::unique_ptr<db::data_listeners> _data_listeners;
+#endif // FEATURE_10
+
     future<> init_commitlog();
     future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, db::timeout_clock::time_point timeout);
     future<> apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&&, db::timeout_clock::time_point timeout);
@@ -1274,7 +1294,10 @@ private:
     future<> apply_with_commitlog(schema_ptr, column_family&, utils::UUID, const frozen_mutation&, db::timeout_clock::time_point timeout);
     future<> apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout);
 
+#ifndef FEATURE_10
+#else
     query::result_memory_limiter _result_memory_limiter;
+#endif // FEATURE_10
 
     future<mutation> do_apply_counter_update(column_family& cf, const frozen_mutation& fm, schema_ptr m_schema, db::timeout_clock::time_point timeout,
                                              tracing::trace_state_ptr trace_state);
@@ -1400,7 +1423,11 @@ public:
         return *_cfg;
     }
 
+#ifndef FEATURE_10
+    db::large_partition_handler* get_large_partition_handler() const {
+#else
     db::large_partition_handler* get_large_partition_handler() {
+#endif// FEATURE_10
         return _large_partition_handler.get();
     }
 
@@ -1451,6 +1478,13 @@ public:
     }
 
     friend class distributed_loader;
+
+#ifndef FEATURE_10
+   db::data_listeners& data_listeners() const { 
+       assert(!!_data_listeners);
+       return *_data_listeners;
+    }
+#endif // FEATURE_10
 };
 
 // Creates a streaming reader that reads from all shards.

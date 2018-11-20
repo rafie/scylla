@@ -356,6 +356,7 @@ scylla_tests = [
     'tests/auth_passwords_test',
     'tests/multishard_mutation_query_test',
     'tests/top_k_test',
+    'tests/data_listeners_test',
 ]
 
 perf_tests = [
@@ -586,6 +587,7 @@ scylla_core = (['database.cc',
                 'db/view/view.cc',
                 'db/view/view_update_from_staging_generator.cc',
                 'db/view/row_locking.cc',
+                 'db/data_listeners.cc',
                 'index/secondary_index_manager.cc',
                 'index/secondary_index.cc',
                 'utils/UUID_gen.cc',

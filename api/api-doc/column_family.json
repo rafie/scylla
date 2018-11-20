@@ -612,6 +612,38 @@
          ]
       },
       {
+         "path":"/column_family/toppartitions/{name}",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Toppartitions query",
+               "type":"string",
+               "nickname":"toppartitions",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+                  {
+                     "name":"name",
+                     "description":"The column family name in keyspace:name format",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"path"
+                  },
+                  {
+                     "name":"duration",
+                     "description":"Duration (in milliseconds) of monitoring operation",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"int",
+                     "paramType":"query"
+                  } 
+               ]
+            }
+         ]
+      },
+      {
          "path":"/column_family/metrics/memtable_columns_count/",
          "operations":[
             {
@@ -2814,6 +2846,44 @@
             "type":{
                "type":"string",
                "description":"The column family type"
+            }
+         }
+      },
+      "topppartition_record":{
+         "id":"topppartition_record",
+		 "description":"nodetool toppartition query record",
+         "properties":{
+            "partition":{
+               "type":"string",
+               "description":"Partition key"
+            },
+            "count":{
+               "type":"string",
+               "description":"Number of read/write operations"
+            },
+            "error":{
+               "type":"string",
+               "description":"Indication of inaccuracy in counting PKs"
+            }
+         }
+	  },
+      "topppartition_query_results":{
+         "id":"topppartition_query_results",
+		 "description":"nodetool toppartition query results",
+         "properties":{
+            "read":{
+               "type":"array",
+               "items":{
+                  "type":"topppartition_record"
+               },
+               "description":"Read results"
+            },
+            "write":{
+               "type":"array",
+               "items":{
+                  "type":"topppartition_record"
+               },
+               "description":"Write results"
             }
          }
       }

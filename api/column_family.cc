@@ -27,6 +27,12 @@
 #include "utils/estimated_histogram.hh"
 #include <algorithm>
 
+#ifndef FEATURE_9
+#include "db/data_listeners.hh"
+
+extern logging::logger apilog;
+#endif // FEATURE_9
+
 namespace api {
 using namespace httpd;
 
@@ -34,7 +40,38 @@ using namespace std;
 using namespace json;
 namespace cf = httpd::column_family_json;
 
+#ifndef FEATURE_7
+struct fully_qualified_cf_name {
+    sstring ks;
+    sstring cf;
+
+    fully_qualified_cf_name(sstring name) {
+        auto pos = name.find("%3A");
+        size_t end;
+        if (pos == sstring::npos) {
+            pos  = name.find(":");
+            if (pos == sstring::npos) {
+                throw bad_param_exception("Column family name should be in keyspace:column_family format");
+            }
+            end = pos + 1;
+        } else {
+            end = pos + 3;
+        }
+        ks = name.substr(0, pos);
+        cf = name.substr(end);
+    }
+};
+#endif // FEATURE_7
+
 const utils::UUID& get_uuid(const sstring& name, const database& db) {
+#ifndef FEATURE_7
+    fully_qualified_cf_name kscf(name);
+    try {
+        return db.find_uuid(kscf.ks, kscf.cf);
+    } catch (std::out_of_range& e) {
+        throw bad_param_exception(format("Column family '{}:{}' not found", kscf.ks, kscf.cf));
+    }
+#else
     auto pos = name.find("%3A");
     size_t end;
     if (pos == sstring::npos) {
@@ -52,6 +89,7 @@ const utils::UUID& get_uuid(const sstring& name, const database& db) {
         throw bad_param_exception("Column family '" + name.substr(0, pos) + ":"
                 + name.substr(end) + "' not found");
     }
+#endif // FEATURE_7
 }
 
 future<> foreach_column_family(http_context& ctx, const sstring& name, function<void(column_family&)> f) {
@@ -920,5 +958,15 @@ void set_column_family(http_context& ctx, routes& r) {
             return make_ready_future<json::json_return_type>(container_to_vec(res));
         });
     });
+
+#ifndef FEATURE_9
+    cf::toppartitions.set(r, [&ctx] (std::unique_ptr<request> req) {
+        fully_qualified_cf_name kscf(req->param["name"]);
+        apilog.info("toppartitions query: name={} duration={}", req->param["name"], req->get_query_param("duration"));
+        return db::toppartitions_query::run(ctx.db, kscf.ks, kscf.cf, req->get_query_param("duration")).then([](const db::toppartitions_query::results& res) {
+            return make_ready_future<json::json_return_type>(res.to_json());
+        });
+    });
+#endif // FEATURE_9
 }
 }

@@ -681,7 +681,16 @@ table::make_reader(schema_ptr s,
         readers.emplace_back(make_sstable_reader(s, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     }
 
+#ifndef FEATURE_10
+    auto comb_reader = make_combined_reader(s, std::move(readers), fwd, fwd_mr);
+    if (_config.data_listeners && !_config.data_listeners->empty()) {
+        return _config.data_listeners->on_read(s, range, slice, std::move(comb_reader));
+    } else {
+        return comb_reader;
+    }
+#else
     return make_combined_reader(s, std::move(readers), fwd, fwd_mr);
+#endif // FEATURE_10
 }
 
 sstables::shared_sstable table::make_streaming_sstable_for_write(std::optional<sstring> subdir) {
@@ -2201,6 +2210,9 @@ database::database(const db::config& cfg, database_config dbcfg)
     , _querier_cache(dbcfg.available_memory * 0.04)
     , _large_partition_handler(std::make_unique<db::cql_table_large_partition_handler>(_cfg->compaction_large_partition_warning_threshold_mb()*1024*1024))
     , _result_memory_limiter(dbcfg.available_memory / 10)
+#ifndef FEATURE_10
+    , _data_listeners(std::make_unique<db::data_listeners>(*this))
+#endif // FEATURE_10
 {
     local_schema_registry().init(*this); // TODO: we're never unbound.
     _compaction_manager->start();
@@ -2737,7 +2749,11 @@ void database::add_column_family(keyspace& ks, schema_ptr schema, column_family:
 
 future<> database::add_column_family_and_make_directory(schema_ptr schema) {
     auto& ks = find_keyspace(schema->ks_name());
+#ifndef FEATURE_5
+    add_column_family(ks, schema, ks.make_column_family_config(*schema, *this));
+#else
     add_column_family(ks, schema, ks.make_column_family_config(*schema, get_config(), get_large_partition_handler()));
+#endif // FEATURE_5
     find_column_family(schema).get_index_manager().reload();
     return ks.make_directory_for_column_family(schema->cf_name(), schema->id());
 }
@@ -2908,6 +2924,46 @@ void keyspace::update_from(::lw_shared_ptr<keyspace_metadata> ksm) {
    create_replication_strategy(_metadata->strategy_options());
 }
 
+#ifndef FEATURE_5
+
+column_family::config
+keyspace::make_column_family_config(const schema& s, const database& db) const {
+    column_family::config cfg;
+    const db::config& db_config = db.get_config();
+
+    for (auto& extra : _config.all_datadirs) {
+        cfg.all_datadirs.push_back(column_family_directory(extra, s.cf_name(), s.id()));
+    }
+    cfg.datadir = cfg.all_datadirs[0];
+    cfg.enable_disk_reads = _config.enable_disk_reads;
+    cfg.enable_disk_writes = _config.enable_disk_writes;
+    cfg.enable_commitlog = _config.enable_commitlog;
+    cfg.enable_cache = _config.enable_cache;
+    cfg.compaction_enforce_min_threshold = _config.compaction_enforce_min_threshold;
+    cfg.dirty_memory_manager = _config.dirty_memory_manager;
+    cfg.streaming_dirty_memory_manager = _config.streaming_dirty_memory_manager;
+    cfg.read_concurrency_semaphore = _config.read_concurrency_semaphore;
+    cfg.streaming_read_concurrency_semaphore = _config.streaming_read_concurrency_semaphore;
+    cfg.cf_stats = _config.cf_stats;
+    cfg.enable_incremental_backups = _config.enable_incremental_backups;
+    cfg.compaction_scheduling_group = _config.compaction_scheduling_group;
+    cfg.memory_compaction_scheduling_group = _config.memory_compaction_scheduling_group;
+    cfg.memtable_scheduling_group = _config.memtable_scheduling_group;
+    cfg.memtable_to_cache_scheduling_group = _config.memtable_to_cache_scheduling_group;
+    cfg.streaming_scheduling_group = _config.streaming_scheduling_group;
+    cfg.statement_scheduling_group = _config.statement_scheduling_group;
+    cfg.enable_metrics_reporting = db_config.enable_keyspace_column_family_metrics();
+    cfg.large_partition_handler = db.get_large_partition_handler();
+    cfg.view_update_concurrency_semaphore = _config.view_update_concurrency_semaphore;
+#ifndef FEATURE_10
+    cfg.data_listeners = &db.data_listeners();
+#endif // FEATURE_10
+
+    return cfg;
+}
+
+#else
+
 column_family::config
 keyspace::make_column_family_config(const schema& s, const db::config& db_config, db::large_partition_handler* lp_handler) const {
     column_family::config cfg;
@@ -2938,6 +2994,8 @@ keyspace::make_column_family_config(const schema& s, const db::config& db_config
 
     return cfg;
 }
+
+#endif // FEATURE_5
 
 sstring
 keyspace::column_family_directory(const sstring& name, utils::UUID uuid) const {
@@ -3564,6 +3622,10 @@ void dirty_memory_manager::start_reclaiming() noexcept {
 
 future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&& h, db::timeout_clock::time_point timeout) {
     auto& cf = find_column_family(m.column_family_id());
+#ifndef FEATURE_10
+    data_listeners().on_write(m_schema, m);
+#endif // FEATURE_10
+
     return cf.dirty_memory_region_group().run_when_memory_available([this, &m, m_schema = std::move(m_schema), h = std::move(h)]() mutable {
         try {
             auto& cf = find_column_family(m.column_family_id());

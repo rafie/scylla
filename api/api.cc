@@ -41,6 +41,10 @@
 #include "system.hh"
 #include "api/config.hh"
 
+#ifndef FEATURE_9
+logging::logger apilog("api");
+#endif // FEATURE_9
+
 namespace api {
 
 static std::unique_ptr<reply> exception_reply(std::exception_ptr eptr) {
