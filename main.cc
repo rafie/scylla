@@ -282,6 +282,56 @@ static stdx::optional<std::vector<sstring>> parse_hinted_handoff_enabled(sstring
     return dcs;
 }
 
+#ifndef FEATURE_1
+
+class config_updaters
+{
+    // Updater methods may throw, exception caught by update() method below
+    std::unordered_map<sstring, std::function<future<> (sstring)>> _updaters {
+    };
+    
+public:
+    future<> update(lw_shared_ptr<db::config> base_cfg, const bpo::variables_map& opts) {
+        auto new_cfg = make_lw_shared<db::config>();
+
+        return read_config(opts, *new_cfg).then([this, base_cfg, new_cfg]() mutable {
+            auto folded = base_cfg->folded();
+            auto new_folded = new_cfg->folded();
+
+            if (!folded || !new_folded) {
+                return make_ready_future<>();
+            }
+            auto diff = new_folded->diff(*folded);
+            return do_for_each(diff.begin(), diff.end(), [this] (auto& kv) {
+                if (!kv.second) { // item removed
+                    return make_ready_future<>();
+                }
+                sstring name;
+                try {
+                    name = kv.first;
+                    auto updater = _updaters.find(name);
+                    if (updater != _updaters.end()) {
+                        return updater->second(kv.second.value());
+                    } else {
+                        startlog.warn("configuration: item not updatable: {}", name);    
+                    }
+                } catch (boost::bad_lexical_cast& x) {
+                    startlog.error("configuration: syntax error in {}: {}", name, x.what());
+                } catch (...) {
+                    startlog.error("configuration: error in {}", name);
+                }
+                return make_ready_future<>();
+            }).then([&base_cfg, new_cfg = std::move(new_cfg)] {
+                auto new_folded = new_cfg->folded();
+                base_cfg->set_folded(new_folded);
+                return make_ready_future<>();
+            });
+        });
+    }
+} config_updaters;
+
+#endif // FEATURE_1
+
 int main(int ac, char** av) {
   int return_value = 0;
   try {
@@ -362,6 +412,24 @@ int main(int ac, char** av) {
         return seastar::async([cfg, ext, &db, &qp, &proxy, &mm, &ctx, &opts, &dirs, &pctx, &prometheus_server, &return_value, &cf_cache_hitrate_calculator] {
             read_config(opts, *cfg).get();
             configurable::init_all(opts, *cfg, *ext).get();
+
+#ifndef FEATURE_1
+            engine().handle_signal(SIGHUP, [cfg, &opts] {
+                char tname[64] = "";
+                pthread_getname_np(pthread_self(), tname, sizeof(tname));
+                auto tid = syscall(SYS_gettid);
+                startlog.info("Received SIGHUP on thread {} ({}): reloading configuration", tid, tname);
+
+                config_updaters.update(cfg, opts).then_wrapped([] (auto && f) {
+                    try {
+                        f.get();
+                        startlog.info("reloading configuration: done");
+                    } catch (...) {
+                        std::cout << "reloading configuration: exception\n";
+                    }
+                });
+            });
+#endif // FEATURE_1
 
             logalloc::prime_segment_pool(memory::stats().total_memory(), memory::min_free_memory()).get();
             logging::apply_settings(cfg->logging_settings(opts));

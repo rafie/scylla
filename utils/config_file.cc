@@ -300,6 +300,10 @@ void utils::config_file::read_from_yaml(const char* yaml, error_handler h) {
             h(label, "Could not convert value", cfg.status());
         }
     }
+
+#ifndef FEATURE_1
+    _folded = std::make_shared<utils::yaml_folded>(doc);
+#endif // FEATURE_1
 }
 
 utils::config_file::configs utils::config_file::set_values() const {
@@ -338,5 +342,87 @@ future<> utils::config_file::read_from_file(const sstring& filename, error_handl
     });
 }
 
+#ifndef FEATURE_1
 
+namespace utils {
 
+void yaml_folded::parse(const YAML::Node& n, sstring key) {
+    if (!n.IsDefined()) {
+        _map[key] = std::nullopt;
+    } else if (n.IsNull()) {
+        _map[key] = std::nullopt;
+    } else if (n.IsScalar()) {
+        _map[key] = n.as<sstring>();
+    } else if (n.IsSequence()) {
+        if (!key.empty()) {
+            key += ":";
+        }
+        int i = 0;
+        for (auto &node : n) {
+            parse(node, key + to_sstring(i++));
+        }
+    } else if (n.IsMap()) {
+        if (!key.empty()) {
+            key += ":";
+        }
+        for (auto kv : n) {
+            parse(kv.second, key + kv.first.as<sstring>());
+        }
+    }
+}
+
+yaml_folded::yaml_folded(const sstring& yaml) {
+    auto node = YAML::Load(yaml.c_str());
+    parse(node);
+}
+
+yaml_folded::yaml_folded(const YAML::Node& yaml_node) {
+    parse(yaml_node);
+}
+
+yaml_folded yaml_folded::yaml_folded::diff(const yaml_folded& old_cfg) const {
+    yaml_map diff;
+    
+    auto& new_map = _map;
+    auto& old_map = old_cfg._map;
+    
+    auto ni = new_map.begin();
+    auto oi = old_map.begin();
+    while (ni != new_map.end() && oi != old_map.end()) {
+        if (ni->first < oi->first) { // added
+            diff[ni->first] = ni->second;
+            ++ni;
+        } else if (oi->first < ni->first) { // removed
+            diff[oi->first] = std::nullopt;
+            ++oi;
+        } else { // changed
+            if (ni->second != oi->second) {
+                diff[ni->first] = ni->second;
+            }
+            ++ni, ++oi;
+        }
+    }
+    
+    // added
+    for (; ni != new_map.end(); ++ni) {
+        diff[ni->first] = ni->second;
+    }
+
+    // items removed
+    for (; oi != old_map.end(); ++ni) {
+        diff[oi->first] = std::nullopt;
+    }
+    
+    return diff;
+}
+
+void yaml_folded::print(std::ostream& out) const {
+    for (auto kv : _map) {
+        out << kv.first << " " << kv.second.value_or("null") << "\n";
+    }
+    out << "---\n";
+}
+
+} // namespace utils
+
+#endif // FEATURE_1

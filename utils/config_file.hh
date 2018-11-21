@@ -25,6 +25,10 @@
 #include <unordered_map>
 #include <iosfwd>
 #include <experimental/string_view>
+#ifndef FEATURE_1
+#include <map>
+#include <variant>
+#endif // FEATURE_1
 
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
@@ -41,6 +45,58 @@ namespace YAML { class Node; }
 namespace utils {
 
 namespace bpo = boost::program_options;
+
+#ifndef FEATURE_1
+// Transforms:
+//
+// foo:
+//   bar: 1
+// list:
+//   - first: a
+//   - second: b
+//
+// Into ordered map:
+//
+// foo:bar: 1
+// list:0:first: a
+// list:1:second: b
+
+class yaml_folded {
+public:
+    using yaml_map = std::map<sstring, std::optional<sstring>>;
+
+protected:
+    yaml_map _map;
+
+    void parse(const YAML::Node& n, sstring key = "");
+
+public:
+    yaml_folded(const sstring& yaml_fname);
+    yaml_folded(const YAML::Node& yaml_node);
+    yaml_folded(const yaml_map& m) : _map(m) {}
+    
+    yaml_folded diff(const yaml_folded& old_cfg) const;
+
+    yaml_map::const_iterator begin() const {
+        return _map.begin();
+    }
+
+    yaml_map::iterator begin() {
+        return _map.begin();
+    }
+
+    yaml_map::iterator end() {
+        return _map.end();
+    }
+
+    yaml_map::const_iterator find(const sstring& key) const {
+        return _map.find(key);
+    }
+
+    void print(std::ostream& out = std::cout) const;
+};
+
+#endif // FEATURE_1
 
 class config_file {
 public:
@@ -172,8 +228,20 @@ public:
         return _cfgs;
     }
 private:
+#ifndef FEATURE_1
+    configs _cfgs;
+
+    std::shared_ptr<yaml_folded> _folded;
+
+public:
+    std::shared_ptr<yaml_folded> folded() { return _folded; }
+    void set_folded(std::shared_ptr<yaml_folded> folded) {
+        _folded = std::move(folded);
+    }
+#else
     configs
         _cfgs;
+#endif // FEATURE_1
 };
 
 extern template struct config_file::named_value<seastar::log_level, config_file::value_status::Used>;
