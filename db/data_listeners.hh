@@ -53,13 +53,13 @@ public:
 
     // Invoked for each query (both data query and mutation query) when a mutation reader is created.
     // Paging queries may invoke this once for a page, or less often, depending on whether they hit in the querier cache or not.
-    // 
+    //
     // The mutation_reader passed to this method is the reader from which the query results are built (uncompacted).
-    // This method replaces that reader with the one returned from this method. 
+    // This method replaces that reader with the one returned from this method.
     // This allows the listener to install on-the-fly processing for the mutation stream.
     //
     // The schema_ptr passed is the one which corresponds to the reader, not the current schema of the table.
-    virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range, 
+    virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
             const query::partition_slice& slice, flat_mutation_reader&& rd) {
         return std::move(rd);
     }
@@ -74,13 +74,13 @@ class partition_counting_listener : public data_listener {
 public:
     partition_counting_listener(const utils::UUID& id) : data_listener(id) {}
 
-    virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range, 
+    virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
         const query::partition_slice& slice, flat_mutation_reader&& rd) override;
 
-    virtual void on_read(const schema_ptr& s, const dht::partition_range& range, 
+    virtual void on_read(const schema_ptr& s, const dht::partition_range& range,
         const query::partition_slice& slice, const dht::decorated_key& dk) {}
 
-    const utils::UUID& id() const { return _id; } 
+    const utils::UUID& id() const { return _id; }
 };
 
 class data_listeners /*: public data_listener */ {
@@ -99,7 +99,7 @@ public:
     future<> uninstall_from_all_shards(seastar::distributed<database>& xdb, const utils::UUID& id);
 #endif // FEATURE_10
 
-    virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range, 
+    virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
             const query::partition_slice& slice, flat_mutation_reader&& rd);
     virtual void on_write(const schema_ptr& s, const frozen_mutation& m);
 
@@ -115,8 +115,8 @@ public:
 class toppartitions_data_listener : public partition_counting_listener {
     friend class toppartitions_query;
 
-	sstring _ks;
-	sstring _cf;
+    sstring _ks;
+    sstring _cf;
     utils::space_saving_top_k<sstring> _top_k_read, _top_k_write;
 
     virtual bool is_applicable(const schema_ptr& s) const override {
@@ -124,34 +124,34 @@ class toppartitions_data_listener : public partition_counting_listener {
     }
 
 public:
-	toppartitions_data_listener(const utils::UUID& query_id, sstring ks, sstring cf)
+    toppartitions_data_listener(const utils::UUID& query_id, sstring ks, sstring cf)
         : partition_counting_listener(query_id), _ks(ks), _cf(cf) {}
 
-    virtual void on_read(const schema_ptr& s, const dht::partition_range& range, 
+    virtual void on_read(const schema_ptr& s, const dht::partition_range& range,
         const query::partition_slice& slice, const dht::decorated_key& dk) override;
 
-	virtual void on_write(const schema_ptr& s, const frozen_mutation& m) override;
+    virtual void on_write(const schema_ptr& s, const frozen_mutation& m) override;
 };
 
 class toppartitions_query {
 public:
-	using query_id = utils::UUID;
+    using query_id = utils::UUID;
 
 private:
-	static std::unordered_map<query_id, lw_shared_ptr<toppartitions_query>> _queries;
+    static std::unordered_map<query_id, lw_shared_ptr<toppartitions_query>> _queries;
 
     distributed<database>& _xdb;
-	query_id _id;
-	sstring _ks;
-	sstring _cf;
+    query_id _id;
+    sstring _ks;
+    sstring _cf;
     std::chrono::milliseconds _duration;
 
 public:
     toppartitions_query(seastar::distributed<database>& xdb, sstring ks, sstring cf, std::chrono::milliseconds duration);
 
     query_id id() const { return _id; }
-	
-	class results {
+
+    class results {
     public:
 #if 0
         struct record {
@@ -171,7 +171,7 @@ public:
         using results_vec = std::vector<std::unordered_map<sstring, sstring>>;
         using json_type = std::unordered_map<sstring, results_vec>;
 #endif
-	
+
         size_t size;
         utils::space_saving_top_k<sstring> top_k_read, top_k_write;
 
@@ -179,21 +179,21 @@ public:
         std::vector<record> collect(const utils::space_saving_top_k<sstring>& data) const;
 #else
         results_vec collect(const utils::space_saving_top_k<sstring>& data) const;
-#endif        
+#endif
 
         results(unsigned k = 256) : size(k),  top_k_read(k), top_k_write(k) {}
 
         json::json_return_type to_json() const;
         json_type map() const;
-	};
+    };
 
     std::chrono::milliseconds duration() const { return _duration; }
 
-	static future<toppartitions_query::results> run(seastar::distributed<database>& xdb, sstring ks, sstring cf, sstring duration);
+    static future<toppartitions_query::results> run(seastar::distributed<database>& xdb, sstring ks, sstring cf, sstring duration);
 
 private:
-	future<> scatter();
-	future<toppartitions_query::results> gather(unsigned res_size = 256);
+    future<> scatter();
+    future<toppartitions_query::results> gather(unsigned res_size = 256);
 };
 
 #endif // FEATURE_3
