@@ -82,6 +82,10 @@
 
 #include "db/timeout_clock.hh"
 
+#ifndef FEATURE_10
+#include "db/data_listeners.hh"
+#endif // FEATURE_10
+
 using namespace std::chrono_literals;
 
 logging::logger dblog("database");
@@ -550,6 +554,10 @@ table::make_sstable_reader(schema_ptr s,
         ? _config.streaming_read_concurrency_semaphore
         : _config.read_concurrency_semaphore;
 
+#ifndef FEATURE_8x
+    db::data_listeners* listener = _config.data_listeners && !_config.data_listeners->empty() ? _config.data_listeners : nullptr;
+#endif // FEATURE_8x
+
     // CAVEAT: if make_sstable_reader() is called on a single partition
     // we want to optimize and read exactly this partition. As a
     // consequence, fast_forward_to() will *NOT* work on the result,
@@ -573,10 +581,29 @@ table::make_sstable_reader(schema_ptr s,
                     return create_single_key_sstable_reader(const_cast<column_family*>(this), std::move(s), std::move(sstables),
                                 _stats.estimated_sstable_per_read, pr, slice, pc, tracker, std::move(trace_state), fwd, fwd_mr);
                 });
+#ifndef FEATURE_8x
+            auto reader = make_restricted_flat_reader(*semaphore, std::move(ms), std::move(s), pr, slice, pc, std::move(trace_state), fwd, fwd_mr);
+            if (listener) {
+                return listener->on_read(s, pr, slice, std::move(reader));
+            } else {
+                return reader;
+            }
+#else
             return make_restricted_flat_reader(*semaphore, std::move(ms), std::move(s), pr, slice, pc, std::move(trace_state), fwd, fwd_mr);
+#endif // FEATURE_8x
         } else {
+#ifndef FEATURE_8x
+            auto reader = create_single_key_sstable_reader(const_cast<column_family*>(this), std::move(s), std::move(sstables),
+                        _stats.estimated_sstable_per_read, pr, slice, pc, no_resource_tracking(), std::move(trace_state), fwd, fwd_mr);
+            if (listener) {
+                return listener->on_read(s, pr, slice, std::move(reader));
+            } else {
+                return reader;
+            }
+#else
             return create_single_key_sstable_reader(const_cast<column_family*>(this), std::move(s), std::move(sstables),
                         _stats.estimated_sstable_per_read, pr, slice, pc, no_resource_tracking(), std::move(trace_state), fwd, fwd_mr);
+#endif // FEATURE_8x
         }
     } else {
         if (semaphore) {
@@ -592,10 +619,29 @@ table::make_sstable_reader(schema_ptr s,
                     return make_local_shard_sstable_reader(std::move(s), std::move(sstables), pr, slice, pc,
                         tracker, std::move(trace_state), fwd, fwd_mr);
                 });
+#ifndef FEATURE_8x
+            auto reader = make_restricted_flat_reader(*semaphore, std::move(ms), std::move(s), pr, slice, pc, std::move(trace_state), fwd, fwd_mr);
+            if (listener) {
+                return listener->on_read(s, pr, slice, std::move(reader));
+            } else {
+                return reader;
+            }
+#else
             return make_restricted_flat_reader(*semaphore, std::move(ms), std::move(s), pr, slice, pc, std::move(trace_state), fwd, fwd_mr);
+#endif // FEATURE_8x
         } else {
+#ifndef FEATURE_8x
+            auto reader = make_local_shard_sstable_reader(std::move(s), std::move(sstables), pr, slice, pc,
+                no_resource_tracking(), std::move(trace_state), fwd, fwd_mr);
+            if (listener) {
+                return listener->on_read(s, pr, slice, std::move(reader));
+            } else {
+                return reader;
+            }
+#else
             return make_local_shard_sstable_reader(std::move(s), std::move(sstables), pr, slice, pc,
                 no_resource_tracking(), std::move(trace_state), fwd, fwd_mr);
+#endif // FEATURE_8x
         }
     }
 }
@@ -2729,6 +2775,9 @@ void database::add_column_family(keyspace& ks, schema_ptr schema, column_family:
     } else {
        cf = make_lw_shared<column_family>(schema, std::move(cfg), column_family::no_commitlog(), *_compaction_manager, *_cl_stats, _row_cache_tracker);
     }
+#ifdef FEATURE_4a
+    cf->set_db(this);
+#endif // FEATURE_4a
 
     auto uuid = schema->id();
     if (_column_families.count(uuid) != 0) {

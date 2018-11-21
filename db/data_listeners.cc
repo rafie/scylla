@@ -35,7 +35,7 @@ namespace db {
 
 #ifndef FEATURE_2
 
-flat_mutation_reader partition_counting_listener::on_read(const schema_ptr& s, const dht::partition_range& range, 
+flat_mutation_reader partition_counting_listener::on_read(const schema_ptr& s, const dht::partition_range& range,
         const query::partition_slice& slice, flat_mutation_reader&& rd) {
     return make_filtering_reader(std::move(rd), [this, &range, &slice, s = std::move(s)] (const dht::decorated_key& dk) {
             this->on_read(s, range, slice, dk);
@@ -68,7 +68,7 @@ future<> data_listeners::uninstall_from_all_shards(distributed<database>& xdb, c
 }
 #endif // FEATURE_10
 
-flat_mutation_reader data_listeners::on_read(const schema_ptr& s, const dht::partition_range& range, 
+flat_mutation_reader data_listeners::on_read(const schema_ptr& s, const dht::partition_range& range,
         const query::partition_slice& slice, flat_mutation_reader&& rd) {
     for (auto&& li : _listeners) {
         if (li->is_applicable(s)) {
@@ -108,7 +108,7 @@ void toppartitions_data_listener::on_write(const schema_ptr& s, const frozen_mut
 
 std::unordered_map<toppartitions_query::query_id, lw_shared_ptr<toppartitions_query>> toppartitions_query::_queries;
 
-toppartitions_query::toppartitions_query(distributed<database>& xdb, sstring ks, sstring cf, std::chrono::milliseconds duration) 
+toppartitions_query::toppartitions_query(distributed<database>& xdb, sstring ks, sstring cf, std::chrono::milliseconds duration)
         : _xdb(xdb), _ks(ks), _cf(cf) {
     _id = utils::UUID_gen::get_time_UUID();
     _duration = duration;
@@ -142,10 +142,10 @@ future<toppartitions_query::results> toppartitions_query::gather(unsigned res_si
                 return std::move(t);
             }
             return std::move(std::tuple<top_t, top_t>());
-        }, 
+        },
         results{res_size},
         [this] (results res, std::tuple<top_t, top_t> rd_wr) {
-            
+
             for (auto& r: std::get<0>(rd_wr)) {
                 res.top_k_read.append(r.item, r.count);
             }
@@ -153,12 +153,10 @@ future<toppartitions_query::results> toppartitions_query::gather(unsigned res_si
                 res.top_k_write.append(w.item, w.count);
             }
             return std::move(res);
-        }).then([] (results res) {
-            return make_ready_future<toppartitions_query::results>(std::move(res));
         });
 }
 
-future<toppartitions_query::results> toppartitions_query::run(distributed<database>& xdb, sstring ks, 
+future<toppartitions_query::results> toppartitions_query::run(distributed<database>& xdb, sstring ks,
         sstring cf, sstring duration) {
     try {
         std::chrono::milliseconds duration_ms{boost::lexical_cast<unsigned>(duration)};
@@ -175,61 +173,10 @@ future<toppartitions_query::results> toppartitions_query::run(distributed<databa
 }
 
 #if 0
-lw_shared_ptr<toppartitions_query> toppartitions_query::find(const toppartitions_query::query_id& id) {
-    auto it = _queries.find(id);
-    return it == _queries.end() ? nullptr : it->second;
-}
-
-future<toppartitions_query::results> toppartitions_query::end(const toppartitions_query::query_id& id) {
-    auto q = find(id);
-    if (!q) {
-        throw std::runtime_error(format("invalid toppartition query id: {}", id.to_sstring()));
-    }
-    return q->gather();
-}
-
-void toppartitions_query::cleanup_shard_expired_queries() {
-    auto t = db::timeout_clock::now();
-    auto it = _queries.begin();
-    while (it != _queries.end()) {
-        if (it->second->_end_of_life < t) {
-            auto id = std::get<0>(*it);
-            dblog.info("toppartitions_query: cleaning up id={}", id.to_sstring());
-            _xdb.local().data_listeners().uninstall(id);
-            it = _queries.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-#endif // 0
-
-#ifdef API_TYPES
-
-std::vector<toppartitions_query::results::record>
-toppartitions_query::results::collect(const utils::space_saving_top_k<sstring>& data) const {
-    std::vector<record> v;
-    for (auto& d : data.top(size)) {
-        v.emplace_back(record{ d.item, to_sstring(d.count), to_sstring(d.error) });
-    }
-    return v;
-}
-
-json::json_return_type toppartitions_query::results::to_json() const {
+toppartitions_query::results::json_type toppartitions_query::results::map() const {
     auto rd = collect(top_k_read);
     auto wr = collect(top_k_write);
-    vectors v{rd, wr};
-    seastar::httpd::column_family_json::topppartition_query_results res;
-    return seastar::json::formatter::to_json(res);
-}
 
-#endif // API_TYPES
-
-#ifndef SIMPLE_TYPES
-
-toppartitions_query::results::json_type toppartitions_query::results::map() const {
-    results_vec rd = collect(top_k_read);
-    results_vec wr = collect(top_k_write);
     return std::unordered_map<sstring, results_vec>{{"read", rd}, {"write", wr}};
 }
 
@@ -238,7 +185,7 @@ toppartitions_query::results::collect(const utils::space_saving_top_k<sstring>& 
     std::vector<std::unordered_map<sstring, sstring>> v;
     for (auto& d: data.top(size)) {
         auto m = std::unordered_map<sstring, sstring>{
-            {"partition", d.item}, 
+            {"partition", d.item},
             {"count", to_sstring(d.count)},
             {"error", to_sstring(d.error)}
         };
@@ -246,12 +193,7 @@ toppartitions_query::results::collect(const utils::space_saving_top_k<sstring>& 
     }
     return v;
 }
-
-json::json_return_type toppartitions_query::results::to_json() const {
-    return seastar::json::formatter::to_json(map());
-}
-
-#endif // SIMPLE_TYPES
+#endif // 0
 
 #endif // FEATURE_3
 

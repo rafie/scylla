@@ -959,6 +959,24 @@ void set_column_family(http_context& ctx, routes& r) {
         });
     });
 
+#ifdef FEATURE_9x
+    cf::start_toppartition_query.set(r, [&ctx] (std::unique_ptr<request> req) {
+        fully_qualified_cf_name kscf(req->param["name"]);
+        auto q = db::toppartition_query::start(ctx.db, kscf.ks, kscf.cf, req->get_query_param("duration"));
+        auto qid = q->id().to_sstring();
+        apilog.info("start_toppartition_query: id={} name={} duration={}", qid, req->param["name"], req->get_query_param("duration"));
+        return make_ready_future<json::json_return_type>(std::map<sstring, sstring>{{"id", qid}});
+    });
+
+    cf::get_toppartition_query_results.set(r, [&ctx] (std::unique_ptr<request> req) {
+        auto qid = req->param["id"];
+        apilog.info("get_toppartition_query_results: id={}", qid);
+        return db::toppartition_query::end(db::toppartition_query::query_id(qid)).then([] (const db::toppartition_query::results& res) {
+            return make_ready_future<json::json_return_type>(res);
+        });
+    });
+#endif // FEATURE_9x
+
 #ifndef FEATURE_9
     cf::toppartitions.set(r, [&ctx] (std::unique_ptr<request> req) {
         fully_qualified_cf_name kscf(req->param["name"]);

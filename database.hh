@@ -492,6 +492,11 @@ private:
     utils::phased_barrier _pending_writes_phaser;
     // Corresponding phaser for in-progress reads.
     utils::phased_barrier _pending_reads_phaser;
+
+#ifdef FEATURE_4x
+    database* _db = nullptr;
+#endif // FEATURE_4x
+
 public:
     future<> add_sstable_and_update_cache(sstables::shared_sstable sst);
     void move_sstable_from_staging_in_thread(sstables::shared_sstable sst);
@@ -962,6 +967,10 @@ public:
     friend class column_family_test;
 
     friend class distributed_loader;
+
+#ifdef FEATURE_4x
+    void set_db(database* db) { _db = db; };
+#endif // FEATURE_4x
 };
 
 using sstable_reader_factory_type = std::function<flat_mutation_reader(sstables::shared_sstable&, const dht::partition_range& pr)>;
@@ -1480,8 +1489,7 @@ public:
     friend class distributed_loader;
 
 #ifndef FEATURE_10
-   db::data_listeners& data_listeners() const { 
-       assert(!!_data_listeners);
+   db::data_listeners& data_listeners() const {
        return *_data_listeners;
     }
 #endif // FEATURE_10
