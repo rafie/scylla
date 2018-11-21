@@ -174,13 +174,28 @@ public:
     };
 #endif
 
+        size_t size;
+        utils::space_saving_top_k<sstring> top_k_read, top_k_write;
+
+#if 0
+        std::vector<record> collect(const utils::space_saving_top_k<sstring>& data) const;
+#else
+        results_vec collect(const utils::space_saving_top_k<sstring>& data) const;
+#endif
+
+        results(unsigned k = 256) : size(k),  top_k_read(k), top_k_write(k) {}
+
+        json::json_return_type to_json() const;
+        json_type map() const;
+    };
+
     std::chrono::milliseconds duration() const { return _duration; }
 
-    static future<results> run(seastar::distributed<database>& xdb, sstring ks, sstring cf, sstring duration);
+    static future<toppartitions_query::results> run(seastar::distributed<database>& xdb, sstring ks, sstring cf, sstring duration);
 
 private:
     future<> scatter();
-    future<results> gather(unsigned results_size = 256);
+    future<toppartitions_query::results> gather(unsigned res_size = 256);
 };
 
 #endif // FEATURE_3
