@@ -52,6 +52,12 @@
 #include <core/file.hh>
 #include <sys/time.h>
 #include <sys/resource.h>
+#ifndef FEATURE_2
+#include <sys/syscall.h>
+#endif // FEATURE_2
+#ifndef FEATURE_1
+#include <boost/filesystem.hpp>
+#endif
 #include "disk-error-handler.hh"
 #include "tracing/tracing.hh"
 #include "core/prometheus.hh"
@@ -64,11 +70,19 @@
 #include "sstables/sstables.hh"
 #include <db/view/view_update_from_staging_generator.hh>
 
+#ifndef FEATURE_2
+extern logging::logger configlog;
+#endif // FEATURE_2
+
 seastar::metrics::metric_groups app_metrics;
 
 using namespace std::chrono_literals;
 
 namespace bpo = boost::program_options;
+
+#ifndef FEATURE_4
+lw_shared_ptr<auxillary_path> aux_path = make_lw_shared<auxillary_path>();
+#endif // FEATURE_4
 
 template<typename K, typename V, typename... Args, typename K2, typename V2 = V>
 V get_or_default(const std::unordered_map<K, V, Args...>& ss, const K2& key, const V2& def = V()) {
@@ -84,29 +98,160 @@ static boost::filesystem::path relative_conf_dir(boost::filesystem::path path) {
     return conf_dir / path;
 }
 
-static future<>
-read_config(bpo::variables_map& opts, db::config& cfg) {
-    using namespace boost::filesystem;
-    sstring file;
+#ifndef FEATURE_1
 
-    if (opts.count("options-file") > 0) {
-        file = opts["options-file"].as<sstring>();
-    } else {
-        file = relative_conf_dir("scylla.yaml").string();
+static boost::filesystem::path config_file_path(const bpo::variables_map& opts) {
+    using namespace boost::filesystem;
+    if (! opts.count("options-file")) {
+        return relative_conf_dir("scylla.yaml").string();
     }
+    return std::string(opts["options-file"].as<sstring>());
+}
+
+#ifndef FEATURE_2
+
+static future<>
+read_config_async(boost::filesystem::path config_file, db::config& cfg) {
+    sstring file = config_file.string();
     return check_direct_io_support(file).then([file, &cfg] {
         return cfg.read_from_file(file, [](auto & opt, auto & msg, auto status) {
             auto level = log_level::warn;
             if (status.value_or(db::config::value_status::Invalid) != db::config::value_status::Invalid) {
                 level = log_level::error;
             }
-            startlog.log(level, "{} : {}", msg, opt);
+            configlog.log(level, "{} : {}", msg, opt);
         });
     }).handle_exception([file](auto ep) {
-        startlog.error("Could not read configuration file {}: {}", file, ep);
+        configlog.error("Could not read configuration file {}: {}", file, ep);
         return make_exception_future<>(ep);
     });
 }
+
+#endif // FEATURE_2
+
+static void
+read_config(boost::filesystem::path config_file, db::config& cfg) {
+    try {
+        std::ifstream ifs(config_file.string());
+        std::string yaml{std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>()};
+        cfg.read_from_yaml(yaml, [] (auto& opt, auto& msg, auto status) {
+            auto level = log_level::warn;
+            if (status.value_or(db::config::value_status::Invalid) != db::config::value_status::Invalid) {
+                level = log_level::error;
+            }
+            configlog.log(level, "{} : {}", msg, opt);
+        });
+    } catch (std::exception ep) {
+        configlog.error("Could not read configuration file {}: {}", config_file.string(), ep);
+    }
+} 
+
+app_template::configuration_reader 
+app_config_reader(app_template& app, db::config& db_config) {
+    return [&] (bpo::variables_map& configuration) {
+#ifndef FEATURE_4
+        sstring fname{((*aux_path)/"config.log").c_str()};
+        std::ofstream out{fname.c_str()};
+	    utils::print(configuration, "Command line config", out);
+#endif // FEATURE_4
+        app.get_default_configuration_reader()(configuration);
+        read_config(config_file_path(configuration), db_config);
+#ifndef FEATURE_4
+		db_config.print("YAML config", out);
+#endif // FEATURE_4
+        db_config.sync(configuration);
+#ifndef FEATURE_4
+	    utils::print(configuration, "Command line config (post sync)", out);
+		db_config.print("YAML config (post sync)", out);
+        configlog.info("Configuration report written to {}", fname);
+#endif // FEATURE_4
+    };
+}
+
+#endif // FEATURE_1
+
+#ifndef FEATURE_2
+class config_updaters
+{
+    static lw_shared_ptr<db::config> main_cfg;
+    boost::filesystem::path config_file_path;
+	lw_shared_ptr<db::config> base_cfg;
+    // note that base_cfg reflects the state of the config yaml flie, 
+    // not necessarily the state of main_cfg
+
+    // Updater methods may throw, exception caught by update() method below
+    std::unordered_map<sstring, std::function<future<> (sstring)>> _updaters {
+#ifndef FEATURE_3
+        { "blocked_reactor_notify_ms", [] (sstring s) {
+                auto value = boost::lexical_cast<unsigned>(s) * 1ms;
+                // config_updaters::main_cfg->blocked_reactor_notify_ms.set_value(s);
+                return smp::invoke_on_all([value] { engine().update_blocked_reactor_notify_ms(value); });
+            }
+        }
+#endif // FEATURE_3
+    };
+    
+public:
+    config_updaters(boost::filesystem::path config_path, lw_shared_ptr<db::config> cfg) : 
+            config_file_path(config_path), 
+            base_cfg(make_lw_shared<db::config>()) {
+        assert(!main_cfg);
+        main_cfg = std::move(cfg);
+        read_config(config_file_path, *base_cfg);
+    }
+
+    future<> update() {
+        auto new_cfg = make_lw_shared<db::config>();
+        std::ostringstream out;
+        return read_config_async(config_file_path, *new_cfg).then([this, new_cfg] () mutable {
+            auto diff = new_cfg->diff(*base_cfg);
+
+            base_cfg->print("Old config", out);
+            new_cfg->print("New config", out);
+            out << "To be reloaded:\n" << diff;
+
+            return do_for_each(diff.begin(), diff.end(), [this, new_cfg, &out] (auto& cfg_ref) mutable {
+                sstring name;
+                try {
+                    auto& cfg = cfg_ref.get();
+                    name = cfg.name().to_string();
+                    auto updater = _updaters.find(name);
+                    if (updater != _updaters.end()) {
+                        stdx::optional<utils::config_file::cfg_ref> cfg_item = main_cfg->find(name);
+                        if (!!cfg_item) {
+                            cfg_item->get().set_value(cfg.text_value());
+                        }
+                        return updater->second(cfg.text_value());
+                    } else {
+                        configlog.warn("configuration: item not updatable: {}", name);    
+                    }
+                } catch (boost::bad_lexical_cast& x) {
+                    configlog.error("configuration: syntax error in {}: {}", name, x.what());
+                }
+                return make_ready_future<>();
+            }).then([this, new_cfg = std::move(new_cfg), &out] () mutable {
+                base_cfg = std::move(new_cfg);
+                main_cfg->print("Main config", out);
+                return open_file_dma(_sorted_fname, open_flags::wo | open_flags::create);
+            }).then([this, &out] (file f) {
+                    auto s = out.str();
+                    return f.write(0, s.size());
+            }).then([&file] (size_t) {
+                return file.close();
+            });
+        }).then_wrapped([] (auto&& f) {
+            try {
+                f.get();
+            } catch (...) {
+                configlog.error("error reading configuration via SIGHUP: {}", std::current_exception());
+            }
+        });
+    }
+};
+
+lw_shared_ptr<db::config> config_updaters::main_cfg;
+#endif // FEATURE_2
+
 static future<> disk_sanity(sstring path, bool developer_mode) {
     return check_direct_io_support(path).then([] {
         return make_ready_future<>();
@@ -298,6 +443,9 @@ int main(int ac, char** av) {
 
     auto ext = std::make_shared<db::extensions>();
     auto cfg = make_lw_shared<db::config>(ext);
+#ifndef FEATURE_1
+    app.set_configuration_reader(app_config_reader(app, *cfg));
+#endif // FEATURE_1
     auto init = app.get_options_description().add_options();
 
     // If --version is requested, print it out and exit immediately to avoid
@@ -338,6 +486,14 @@ int main(int ac, char** av) {
         fmt::print("Scylla version {} starting ...\n", scylla_version());
         auto&& opts = app.configuration();
 
+#ifndef FEATURE_4
+        aux_path = make_lw_shared<auxillary_path>(*cfg);
+#endif // FEATURE_4
+
+#ifndef FEATURE_2
+        auto cfg_updaters = make_lw_shared<config_updaters>(config_file_path(opts), cfg);
+#endif // FEATURE_2
+
         namespace sm = seastar::metrics;
         app_metrics.add_group("scylladb", {
             sm::make_gauge("current_version", sm::description("Current ScyllaDB version."), { sm::label_instance("version", scylla_version()), sm::shard_label("") }, [] { return 0; })
@@ -359,12 +515,34 @@ int main(int ac, char** av) {
 
         tcp_syncookies_sanity();
 
-        return seastar::async([cfg, ext, &db, &qp, &proxy, &mm, &ctx, &opts, &dirs, &pctx, &prometheus_server, &return_value, &cf_cache_hitrate_calculator] {
+        return seastar::async([cfg, ext, cfg_updaters, &db, &qp, &proxy, &mm, &ctx, &opts, &dirs, &pctx, &prometheus_server, &return_value, &cf_cache_hitrate_calculator] {
+#ifndef FEATURE_1
+#else
             read_config(opts, *cfg).get();
+            cfg->sync(opts);
+#endif // FEATURE_1
             configurable::init_all(opts, *cfg, *ext).get();
 
             logalloc::prime_segment_pool(memory::stats().total_memory(), memory::min_free_memory()).get();
             logging::apply_settings(cfg->logging_settings(opts));
+
+#ifndef FEATURE_2
+            engine().handle_signal(SIGHUP, [cfg_updaters = std::move(cfg_updaters)] {
+                char tname[64] = "";
+                pthread_getname_np(pthread_self(), tname, sizeof(tname));
+                auto tid = syscall(SYS_gettid);
+                configlog.info("Received SIGHUP on thread {} ({}): reloading configuration", tid, tname);
+
+                cfg_updaters->update().then_wrapped([] (auto && f) {
+                    try {
+                        f.get();
+                        configlog.info("Reloading configuration: done");
+                    } catch (...) {
+                        configlog.error("Exception while reloading configuration: {}", std::current_exception());
+                    }
+                });
+            });
+#endif // FEATURE_2
 
             verify_rlimit(cfg->developer_mode());
             verify_adequate_memory_per_shard(cfg->developer_mode());

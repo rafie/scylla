@@ -28,6 +28,9 @@
 #include "db/system_distributed_keyspace.hh"
 #include "database.hh"
 #include "log.hh"
+#ifndef FEATURE_4
+#include <boost/filesystem.hpp>
+#endif
 
 namespace db {
 class extensions;
@@ -96,3 +99,14 @@ public:
 private:
     static void register_configurable(configurable &);
 };
+
+#ifndef FEATURE_4
+class auxillary_path : public boost::filesystem::path {
+    typedef boost::filesystem::path super;
+    void ctor();
+
+public:
+    auxillary_path();
+    auxillary_path(const db::config& cfg);
+};
+#endif // FEATURE_4

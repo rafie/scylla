@@ -35,9 +35,16 @@
 #include <seastar/core/fstream.hh>
 #include <seastar/core/do_with.hh>
 #include <seastar/core/print.hh>
+#ifndef FEATURE_4
+#include <seastar/util/program-options.hh>
+#endif // FEATURE_4
+
+#include "log.hh"
 
 #include "config_file.hh"
 #include "config_file_impl.hh"
+
+logging::logger configlog("config"); 
 
 namespace bpo = boost::program_options;
 
@@ -197,43 +204,51 @@ std::istream& std::operator>>(std::istream& is, std::vector<seastar::sstring>& r
 
    return is;
 }
+
 template std::istream& std::operator>>(std::istream&, std::unordered_map<seastar::sstring, seastar::sstring>&);
 
-sstring utils::hyphenate(const stdx::string_view& v) {
+namespace utils {
+
+sstring hyphenate(const stdx::string_view& v) {
     sstring result(v.begin(), v.end());
     std::replace(result.begin(), result.end(), '_', '-');
     return result;
 }
 
-utils::config_file::config_file(std::initializer_list<cfg_ref> cfgs)
-    : _cfgs(cfgs)
+sstring dehyphenate(const stdx::string_view& v) {
+    sstring result(v.begin(), v.end());
+    std::replace(result.begin(), result.end(), '-', '_');
+    return result;
+}
+
+config_file::config_file(std::initializer_list<cfg_ref> cfgs) : _cfgs(cfgs)
 {}
 
-void utils::config_file::add(cfg_ref cfg) {
+void config_file::add(cfg_ref cfg) {
     _cfgs.emplace_back(cfg);
 }
 
-void utils::config_file::add(std::initializer_list<cfg_ref> cfgs) {
+void config_file::add(std::initializer_list<cfg_ref> cfgs) {
     _cfgs.insert(_cfgs.end(), cfgs.begin(), cfgs.end());
 }
 
-void utils::config_file::add(const std::vector<cfg_ref> & cfgs) {
+void config_file::add(const std::vector<cfg_ref> & cfgs) {
     _cfgs.insert(_cfgs.end(), cfgs.begin(), cfgs.end());
 }
 
-bpo::options_description utils::config_file::get_options_description() {
+bpo::options_description config_file::get_options_description() {
     bpo::options_description opts("");
     return get_options_description(opts);
 }
 
-bpo::options_description utils::config_file::get_options_description(boost::program_options::options_description opts) {
+bpo::options_description config_file::get_options_description(boost::program_options::options_description opts) {
     auto init = opts.add_options();
     add_options(init);
     return std::move(opts);
 }
 
 bpo::options_description_easy_init&
-utils::config_file::add_options(bpo::options_description_easy_init& init) {
+config_file::add_options(bpo::options_description_easy_init& init) {
     for (config_src& src : _cfgs) {
         if (src.status() == value_status::Used) {
             auto&& name = src.name();
@@ -245,11 +260,11 @@ utils::config_file::add_options(bpo::options_description_easy_init& init) {
     return init;
 }
 
-void utils::config_file::read_from_yaml(const sstring& yaml, error_handler h) {
+void config_file::read_from_yaml(const sstring& yaml, error_handler h) {
     read_from_yaml(yaml.c_str(), std::move(h));
 }
 
-void utils::config_file::read_from_yaml(const char* yaml, error_handler h) {
+void config_file::read_from_yaml(const char* yaml, error_handler h) {
     std::unordered_map<sstring, cfg_ref> values;
 
     if (!h) {
@@ -302,13 +317,13 @@ void utils::config_file::read_from_yaml(const char* yaml, error_handler h) {
     }
 }
 
-utils::config_file::configs utils::config_file::set_values() const {
+config_file::configs config_file::set_values() const {
     return boost::copy_range<configs>(_cfgs | boost::adaptors::filtered([] (const config_src& cfg) {
         return cfg.status() > value_status::Used || cfg.source() > config_source::None;
     }));
 }
 
-utils::config_file::configs utils::config_file::unset_values() const {
+config_file::configs config_file::unset_values() const {
     configs res;
     for (config_src& cfg : _cfgs) {
         if (cfg.status() > value_status::Used) {
@@ -322,7 +337,7 @@ utils::config_file::configs utils::config_file::unset_values() const {
     return res;
 }
 
-future<> utils::config_file::read_from_file(file f, error_handler h) {
+future<> config_file::read_from_file(file f, error_handler h) {
     return f.size().then([this, f, h](size_t s) {
         return do_with(make_file_input_stream(f), [this, s, h](input_stream<char>& in) {
             return in.read_exactly(s).then([this, h](temporary_buffer<char> buf) {
@@ -332,11 +347,298 @@ future<> utils::config_file::read_from_file(file f, error_handler h) {
     });
 }
 
-future<> utils::config_file::read_from_file(const sstring& filename, error_handler h) {
+future<> config_file::read_from_file(const sstring& filename, error_handler h) {
     return open_file_dma(filename, open_flags::ro).then([this, h](file f) {
        return read_from_file(std::move(f), h);
     });
 }
 
+stdx::optional<config_file::cfg_ref> config_file::find(sstring name) {
+    for (auto& ci: values()) {
+        auto& c = ci.get();
+        if (c.name() == name) {
+            return ci;
+        }
+    }
+    return stdx::nullopt;
+}
 
+void config_file::print(sstring title, std::ostream& out) const {
+    if (!title.empty()) {
+        out << title << ":\n";
+    }
+    out << _cfgs;
+}
 
+std::ostream& operator<<(std::ostream& out, const config_file::configs& cfg) {
+    for (auto& ci: cfg) {
+        auto& c = ci.get();
+        sstring source;
+        switch (c.source()) {
+        case config_file::config_source::None: 
+            source = "none"; 
+            continue;
+        case config_file::config_source::SettingsFile: 
+            source = "yaml"; 
+            break;
+        case config_file::config_source::CommandLine: 
+            source = "cmdline"; 
+            break;
+        };
+        out << "> " << c.name() << ": " << source << ": " << c.text_value() << "\n";
+    }
+    out << "---\n";
+    return out;
+}
+
+#ifndef FEATURE_2
+config_file::configs config_file::diff(const config_file &old_file) const {
+    std::map<stdx::string_view, cfg_ref> old_cfg, new_cfg;
+    config_file::configs diff;
+
+    for (auto& ci: values()) {
+        auto& c = ci.get();
+        if (c.source() == config_source::SettingsFile) {
+            new_cfg.try_emplace(c.name(), ci);
+        }
+    }
+
+    for (auto& ci: old_file.values()) {
+        auto& c = ci.get();
+        if (c.source() == config_source::SettingsFile) {
+            old_cfg.try_emplace(c.name(), ci);
+        }
+    }
+
+    auto new_i = new_cfg.begin();
+    auto old_i = old_cfg.begin();
+
+    while (new_i != new_cfg.end() && old_i != old_cfg.end()) {
+        
+        if (new_i->first < old_i->first) { // added
+            diff.emplace_back(new_i->second);
+            ++new_i;
+        } else if (old_i->first < new_i->first) { // removed
+            // nop
+            ++old_i;
+        } else { // changed
+            if (new_i->second.get().text_value() != old_i->second.get().text_value()) {
+                diff.emplace_back(new_i->second);
+            }
+            ++new_i, ++old_i;
+        }
+    }
+
+    // added
+    for (; new_i != new_cfg.end(); ++new_i) {
+        diff.emplace_back(new_i->second);
+    }
+
+    // items removed - nop
+
+    return diff;
+}
+#endif // FEATURE_2
+
+// boost::any to be re-assigned to its original type
+
+template <class T>
+void any_compat_set(boost::any& a, T&& b) {
+    auto& t = a.type();    
+    if (t == typeid(std::string)) {
+        a = boost::lexical_cast<std::string>(b);
+    } else if (t == typeid(seastar::sstring)) {
+        a = boost::lexical_cast<sstring>(b);
+    } else if (t == typeid(int)) {
+        a = boost::lexical_cast<int>(b);
+    } else if (t == typeid(int32_t)) {
+        a = boost::lexical_cast<int32_t>(b);
+    } else if (t == typeid(uint32_t)) {
+        a = boost::lexical_cast<uint32_t>(b);
+    } else if (t == typeid(int64_t)) {
+        a = boost::lexical_cast<int64_t>(b);
+    } else if (t == typeid(unsigned)) {
+        a = boost::lexical_cast<unsigned>(b);
+    } else if (t == typeid(bool)) {
+        a = boost::lexical_cast<bool>(b);
+    } else if (t == typeid(float)) {
+        a = boost::lexical_cast<float>(b);
+    } else if (t == typeid(double)) {
+        a = boost::lexical_cast<double>(b);
+    } else {
+        throw boost::bad_lexical_cast(typeid(b), t);
+    }
+}
+
+static sstring
+to_sstring(const bpo::variable_value& v) {
+    boost::any a = v.value();
+    auto& t = a.type();
+    
+    sstring s;
+    if (t == typeid(std::string)) {
+        s = v.as<std::string>();
+    } else if (t == typeid(seastar::sstring)) {
+        s = v.as<sstring>();
+    } else if (t == typeid(int)) {
+        s = boost::lexical_cast<std::string>(v.as<int>());
+    } else if (t == typeid(int32_t)) {
+        s = boost::lexical_cast<std::string>(v.as<int32_t>());
+    } else if (t == typeid(uint32_t)) {
+        s = boost::lexical_cast<std::string>(v.as<uint32_t>());
+    } else if (t == typeid(int64_t)) {
+        s = boost::lexical_cast<std::string>(v.as<int64_t>());
+    } else if (t == typeid(unsigned)) {
+        s = boost::lexical_cast<std::string>(v.as<unsigned>());
+    } else if (t == typeid(bool)) {
+        s = boost::lexical_cast<std::string>(v.as<bool>());
+    } else if (t == typeid(float)) {
+        s = boost::lexical_cast<std::string>(v.as<float>());
+    } else if (t == typeid(double)) {
+        s = boost::lexical_cast<std::string>(v.as<double>());
+    } else {
+        throw boost::bad_lexical_cast(t, typeid(sstring));
+    }
+    
+    return s;
+}
+
+void config_file::sync(bpo::variables_map& opts) {
+    // opts->config: opts should override existing config
+    sstring item_name;
+    
+    for (auto opt_i: opts) {
+        try {
+            auto &opt_name = opt_i.first;
+            auto &opt = opt_i.second;
+
+            item_name = opt_name;
+
+            if (opt.empty() || opt.defaulted()) {
+                continue;
+            }
+
+            auto cfg_name{dehyphenate(opt_name)};
+            stdx::optional<cfg_ref> cfg_item = find(cfg_name);
+            if (!cfg_item) {
+                continue;
+            }
+            sstring opt_sval;
+            try {
+                opt_sval = to_sstring(opt);
+            } catch (...) {
+                continue;
+            }
+            
+            auto cfg_sval = cfg_item->get().text_value();
+            if (cfg_sval == opt_sval) {
+                continue;
+            }
+            configlog.info("sync opts->yaml: {}={} [was {}]", opt_name, opt_sval, cfg_sval);
+            cfg_item->get().set_value(opt_sval);
+        } catch (...) {
+            configlog.error("sync opt->yaml: problem with {}", item_name);
+        }
+    }
+
+    // config->opts: set if config is present in file (not by default) and opt is missing
+    for (auto& cfg_i: values()) {
+        try {
+            auto& cfg = cfg_i.get();
+
+            sstring cfg_name{cfg.name()};
+            auto opt_name = hyphenate(cfg_name);
+            item_name = opt_name;
+
+            auto& opt = opts[opt_name];
+            if (! (opt.empty() || opt.defaulted())) {
+                continue;
+            }
+
+            sstring opt_sval;
+            try {
+                opt_sval = to_sstring(opt);
+            } catch (...) {}
+          
+            if (cfg.source() == config_source::SettingsFile && cfg.status() == value_status::UsedFromSeastar) {
+                auto cfg_sval = cfg.text_value();
+                if (cfg_sval != opt_sval) {
+                    configlog.info("sync yaml->opts: {}={} [was {}]", cfg_name, cfg_sval, opt_sval);
+                    try {
+                        any_compat_set(opts.at(std::string(opt_name)).value(), cfg_sval);
+                    } catch (...) {
+                        opts.insert(std::make_pair(opt_name, bpo::variable_value(cfg.value(), false)));
+                    }
+                }
+            }
+        } catch (...) {
+            configlog.error("sync yaml->opt: problem with {}", item_name);
+        }
+    }
+}
+
+#ifndef FEATURE_4
+
+std::ostream& operator<<(std::ostream& out, logger_timestamp_style lts) {
+    switch (lts) {
+    case logger_timestamp_style::none: return out << "none";
+    case logger_timestamp_style::boot: return out << "boot";
+    case logger_timestamp_style::real: return out << "real";
+    }
+    return out;
+}
+
+void print(const bpo::variables_map& vm, sstring title, std::ostream& out)
+{
+    if (!title.empty()) {
+        out << title << "\n";
+    }
+    for (auto it: vm)
+    {
+        auto &name = it.first;
+        auto &v = it.second;
+        boost::any a = v.value();
+    
+        out << "> " << name;
+        if (v.empty() || a.empty()) {
+            out << "(empty)";
+        }
+        if (v.defaulted()) {
+            out << "(default)";
+        }
+        out << "=";
+
+        try {
+            auto s = utils::to_sstring(v);
+            out << s;
+        } catch (...) {
+            auto& t = a.type(); 
+            if (t == typeid(seastar::program_options::string_map)) {
+                out << "[";
+                for (auto j: v.as<seastar::program_options::string_map>())
+                    out << j.first << ":" << j.second << " ";
+                out << "]";
+            }
+            else if (t == typeid(seastar::logger_timestamp_style)) {
+                out << v.as<seastar::logger_timestamp_style>();
+            }
+            else {
+                try {
+                    std::vector<std::string> w = v.as<std::vector<std::string>>();
+                    uint i = 0;
+                    for (auto j: w)
+                        out << "\r> " << name << "[" << i++ << "]=" << j << "\n";
+                }
+                catch (...) {
+                    out << "UnknownType(" << t.name() << ")";
+                }
+            }
+        }
+        out << "\n";
+    }
+    out << "---\n";
+}
+
+#endif // FEATURE_4
+
+} // namespace utils

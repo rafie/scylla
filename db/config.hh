@@ -55,6 +55,10 @@ struct seed_provider_type {
     }
     sstring class_name;
     std::unordered_map<sstring, sstring> parameters;
+    
+#ifndef FEATURE_4
+    friend std::istream& operator>>(std::istream& is, db::seed_provider_type& self);
+#endif // FEATURE_4
 };
 
 class config : public utils::config_file {
@@ -740,6 +744,65 @@ public:
     val(cpu_scheduler, bool, true, Used, "Enable cpu scheduling") \
     val(view_building, bool, true, Used, "Enable view building; should only be set to false when the node is experience issues due to view building") \
     val(enable_sstables_mc_format, bool, false, Used, "Enable SSTables 'mc' format to be used as the default file format; FOR TESTING PURPOSES ONLY - TO BE REMOVED BEFORE RELEASE") \
+    /* #ifndef FEATURE_4 */ \
+    val(aux_directory, sstring, /**/, Used, "Directory for auxillary files, mostly for diagnostic purposes") \
+    /* #endif // FEATURE_4 */ \
+    \
+    /* Seastar */ \
+    \
+    val(metrics_hostname, sstring, /**/, UsedFromSeastar, "set the hostname used by the metrics, if not set, the local hostname will be used") \
+    val(network_stack, sstring, /**/, UsedFromSeastar, "network stack") \
+    val(no_handle_interrupt, bool, false, UsedFromSeastar, "ignore SIGINT (for gdb)") \
+    val(poll_mode, bool, false, UsedFromSeastar, "poll continuously (100% cpu use)") \
+    val(idle_poll_time_us, unsigned, 200, UsedFromSeastar, "idle polling time in microseconds (reduce for overprovisioned environments or laptops)") \
+    val(poll_aio, bool, true, UsedFromSeastar, "busy-poll for disk I/O (reduces latency and increases throughput)") \
+    val(task_quota_ms, double, 0.5, UsedFromSeastar, "Max time (ms) between polls") \
+    val(max_task_backlog, unsigned, 1000, UsedFromSeastar, "Maximum number of task backlog to allow; above this we ignore I/O") \
+    val(blocked_reactor_notify_ms, unsigned, 2000, UsedFromSeastar, "threshold in miliseconds over which the reactor is considered blocked if no progress is made") \
+    val(blocked_reactor_reports_per_minute, unsigned, 5, UsedFromSeastar, "Maximum number of backtraces reported by stall detector per minute") \
+    val(relaxed_dma, bool, false, UsedFromSeastar, "allow using buffered I/O if DMA is not available (reduces performance)") \
+    val(unsafe_bypass_fsync, bool, false, UsedFromSeastar, "Bypass fsync(, may result in data loss. Use for testing on consumer drives") \
+    val(overprovisioned, bool, false, UsedFromSeastar, "run in an overprovisioned environment (such as docker or a laptop); equivalent to --idle-poll-time-us 0 --thread-affinity 0 --poll-aio 0") \
+    val(abort_on_seastar_bad_alloc, bool, false, UsedFromSeastar, "abort when seastar allocator cannot allocate memory") \
+    \
+    val(smp, unsigned, /**/, UsedFromSeastar, "number of threads (default: one per CPU)") \
+    val(cpuset, sstring, /**/, UsedFromSeastar, "CPUs to use (in cpuset(7) format; default: all))") \
+    val(memory, sstring, /**/, UsedFromSeastar, "memory to use, in bytes (ex: 4G) (default: all)") \
+    val(reserve_memory, sstring, /**/, UsedFromSeastar, "memory reserved to OS (if --memory not specified)") \
+    val(hugepages, sstring, /**/, UsedFromSeastar, "path to accessible hugetlbfs mount (typically /dev/hugepages/something)") \
+    val(lock_memory, bool, /**/, UsedFromSeastar, "lock all memory (prevents swapping)") \
+    val(thread_affinity, bool, true, UsedFromSeastar, "pin threads to their cpus (disable for overprovisioning)") \
+    val(num_io_queues, unsigned, /**/, UsedFromSeastar, "Number of IO queues. Each IO unit will be responsible for a fraction of the IO requests. Defaults to the number of threads") \
+    val(max_io_requests, unsigned, /**/, UsedFromSeastar, "Maximum amount of concurrent requests to be sent to the disk. Defaults to 128 times the number of IO queues") \
+    val(io_properties_file, sstring, /**/, UsedFromSeastar, "path to a YAML file describing the chraracteristics of the I/O Subsystem") \
+    val(io_properties, sstring, /**/, UsedFromSeastar, "a YAML string describing the chraracteristics of the I/O Subsystem") \
+    val(mbind, bool, true, UsedFromSeastar, "enable mbind") \
+    val(enable_glibc_exception_scaling_workaround, bool, true, UsedFromSeastar, "enable workaround for glibc/gcc c++ exception scalablity problem") \
+    \
+    val(collectd, bool, false, UsedFromSeastar, "enable collectd daemon") \
+    val(collectd_address, sstring, "239.192.74.66:25826", UsedFromSeastar, "address to send/broadcast metrics to") \
+    val(collectd_poll_period, unsigned, 1000, UsedFromSeastar, "poll period - frequency of sending counter metrics (default: 1000ms, 0 disables)") \
+    val(collectd_hostname, sstring, "", UsedFromSeastar, "Deprecated option, use metrics-hostname instead") \
+    \
+    val(dpdk_port_index, unsigned, 0, UsedFromSeastar, "DPDK Port Index") \
+    val(hw_fc, sstring, "on", UsedFromSeastar, "Enable HW Flow Control (on / off)") \
+    \
+    val(tap_device, sstring, "tap0", UsedFromSeastar, "tap device to connect to") \
+    val(host_ipv4_addr, sstring, "192.168.122.2", UsedFromSeastar, "static IPv4 address to use") \
+    val(gw_ipv4_addr, sstring, "192.168.122.1", UsedFromSeastar, "static IPv4 gateway to use") \
+    val(netmask_ipv4_addr, sstring, "255.255.255.0", UsedFromSeastar, "static IPv4 netmask to use") \
+    val(udpv4_queue_size, int, /* ipv4_udp::default_queue_size */, UsedFromSeastar, "Default size of the UDPv4 per-channel packet queue") \
+    val(dhcp, bool, true, UsedFromSeastar, "Use DHCP discovery") \
+    val(hw_queue_weight, float, 1.0f,  UsedFromSeastar, "Weighing of a hardware network queue relative to a software queue (0=no work, 1=equal share)") \
+    val(dpdk_pmd, bool, false, UsedFromSeastar, "Use DPDK PMD drivers") \
+    val(lro, sstring, "on", UsedFromSeastar, "Enable LRO") \
+    \
+    val(event_index, sstring, "on", UsedFromSeastar, "Enable event-index feature (on / off)") \
+    val(csum_offload, sstring, "on", UsedFromSeastar, "Enable checksum offload feature (on / off)") \
+    val(tso, sstring, "on", UsedFromSeastar, "Enable TCP segment offload feature (on / off)") \
+    val(ufo, sstring, "on", UsedFromSeastar, "Enable UDP fragmentation offload feature (on / off)") \
+    val(virtio_ring_size, unsigned, 256, UsedFromSeastar, "Virtio ring size (must be power-of-two)") \
+    \
     /* done! */
 
 #define _make_value_member(name, type, deflt, status, desc, ...)    \

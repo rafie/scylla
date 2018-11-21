@@ -179,14 +179,12 @@ inline typed_value_ex<std::vector<T>>* value_ex(std::vector<T>* v) {
     return r;
 }
 
-}
+} // namespace
 
 sstring hyphenate(const stdx::string_view&);
 
-}
-
 template<typename T, utils::config_file::value_status S>
-void utils::config_file::named_value<T, S>::add_command_line_option(
+void config_file::named_value<T, S>::add_command_line_option(
                 boost::program_options::options_description_easy_init& init,
                 const stdx::string_view& name, const stdx::string_view& desc) {
     // NOTE. We are not adding default values. We could, but must in that case manually (in some way) geenrate the textual
@@ -195,8 +193,21 @@ void utils::config_file::named_value<T, S>::add_command_line_option(
     init(hyphenate(name).data(), value_ex(&_value)->notifier([this](auto&&) { _source = config_source::CommandLine; }), desc.data());
 }
 
-template<typename T, utils::config_file::value_status S>
-void utils::config_file::named_value<T, S>::set_value(const YAML::Node& node) {
+template<typename T, config_file::value_status S>
+void config_file::named_value<T, S>::set_value(const YAML::Node& node) {
     (*this)(node.as<T>());
+    if (node.IsScalar()) {
+        _text = node.as<sstring>();
+    }
+
     _source = config_source::SettingsFile;
 }
+
+template<typename T, config_file::value_status S>
+void config_file::named_value<T, S>::set_value(sstring val) {
+    (*this)(boost::lexical_cast<T>(val));
+    _text = val;
+    _source = config_source::SettingsFile;
+}
+
+} // namespace utils

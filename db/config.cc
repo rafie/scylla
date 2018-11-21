@@ -80,13 +80,30 @@ struct convert<db::config::seed_provider_type> {
 
 }
 
+#ifndef FEATURE_1
+namespace db {
+std::istream& operator>>(std::istream& is, db::seed_provider_type& self) 
+{
+    YAML::Node node = YAML::Load(is);
+    YAML::convert<db::config::seed_provider_type>::decode(node, self);
+    return is;
+}
+
+}
+#endif // FEATURE_2
+
 #define _mk_name(name, ...) name,
 #define str(x)  #x
 #define _mk_init(name, type, deflt, status, desc, ...)  , name(str(name), type(deflt), desc)
 
 db::config::config(std::shared_ptr<db::extensions> exts)
-    : utils::config_file({ _make_config_values(_mk_name)
-        default_log_level, logger_log_level, log_to_stdout, log_to_syslog })
+    : utils::config_file({
+        _make_config_values(_mk_name)
+        default_log_level,
+        logger_log_level,
+        log_to_stdout,
+        log_to_syslog
+    })
     _make_config_values(_mk_init)
     , default_log_level("default_log_level")
     , logger_log_level("logger_log_level")

@@ -48,9 +48,10 @@ public:
     typedef std::vector<sstring> string_list;
 
     enum class value_status {
-        Used,
+        UsedFromSeastar,
+        Used, // note that it is used as pivot in comparisons
         Unused,
-        Invalid,
+        Invalid
     };
 
     enum class config_source : uint8_t {
@@ -61,6 +62,8 @@ public:
 
     struct config_src {
         stdx::string_view _name, _desc;
+        sstring _text;
+		
     public:
         config_src(stdx::string_view name, stdx::string_view desc)
             : _name(name)
@@ -74,11 +77,16 @@ public:
         const stdx::string_view & desc() const {
             return _desc;
         }
+        virtual sstring text_value() const {
+            return _text;
+        }
 
         virtual void add_command_line_option(
                         bpo::options_description_easy_init&, const stdx::string_view&,
                         const stdx::string_view&) = 0;
+        virtual boost::any value() const = 0;
         virtual void set_value(const YAML::Node&) = 0;
+        virtual void set_value(sstring) = 0;
         virtual value_status status() const = 0;
         virtual config_source source() const = 0;
     };
@@ -90,6 +98,7 @@ public:
         stdx::string_view _name, _desc;
         T _value = T();
         config_source _source = config_source::None;
+
     public:
         typedef T type;
         typedef named_value<T, S> MyType;
@@ -103,6 +112,9 @@ public:
         }
         config_source source() const override {
             return _source;
+        }
+        boost::any value() const override {
+            return _value;
         }
         bool is_set() const {
             return _source > config_source::None;
@@ -128,6 +140,7 @@ public:
         void add_command_line_option(bpo::options_description_easy_init&,
                         const stdx::string_view&, const stdx::string_view&) override;
         void set_value(const YAML::Node&) override;
+        void set_value(sstring) override;
     };
 
     typedef std::reference_wrapper<config_src> cfg_ref;
@@ -138,11 +151,10 @@ public:
     void add(std::initializer_list<cfg_ref>);
     void add(const std::vector<cfg_ref> &);
 
-    boost::program_options::options_description get_options_description();
-    boost::program_options::options_description get_options_description(boost::program_options::options_description);
+    bpo::options_description get_options_description();
+    bpo::options_description get_options_description(bpo::options_description);
 
-    boost::program_options::options_description_easy_init&
-    add_options(boost::program_options::options_description_easy_init&);
+    bpo::options_description_easy_init& add_options(bpo::options_description_easy_init&);
 
     /**
      * Default behaviour for yaml parser is to throw on
@@ -161,6 +173,7 @@ public:
 
     void read_from_yaml(const sstring&, error_handler = {});
     void read_from_yaml(const char *, error_handler = {});
+    
     future<> read_from_file(const sstring&, error_handler = {});
     future<> read_from_file(file, error_handler = {});
 
@@ -171,12 +184,28 @@ public:
     const configs& values() const {
         return _cfgs;
     }
+
+    stdx::optional<cfg_ref> find(sstring name);
+
 private:
-    configs
-        _cfgs;
+    configs _cfgs;
+
+public:
+    void set(sstring name, sstring value);
+
+    void print(sstring title = "Configuation", std::ostream& out = std::cout) const;
+    friend std::ostream& operator<<(std::ostream& out, const config_file::configs& cfg);
+
+#ifndef FEATURE_2
+    configs diff(const config_file &old) const;
+#endif // FEATURE_2
+    void sync(bpo::variables_map& opts);
 };
 
 extern template struct config_file::named_value<seastar::log_level, config_file::value_status::Used>;
 
-}
+#ifndef FEATURE_4
+void print(const bpo::variables_map& vm, sstring title = "", std::ostream& out = std::cout);
+#endif // FEATURE_4
 
+} // namespace utils

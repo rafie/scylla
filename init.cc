@@ -19,6 +19,10 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#ifndef FEATURE_4
+#include <sys/stat.h>
+#endif // FEATURE_4
+
 #include "init.hh"
 #include "message/messaging_service.hh"
 #include "gms/failure_detector.hh"
@@ -187,3 +191,25 @@ future<> configurable::init_all(const db::config& cfg, db::extensions& exts) {
         return init_all(opts, cfg, exts);
     });
 }
+
+#ifndef FEATURE_4
+
+void auxillary_path::ctor() {
+    if (::mkdir(c_str(), S_IRWXU) && errno != EEXIST) {
+        throw std::runtime_error(sprint("Failed to create auxillary directory at %s", c_str()));
+    }
+}
+
+auxillary_path::auxillary_path() : boost::filesystem::path("/tmp/scylla-aux") {
+}
+
+auxillary_path::auxillary_path(const db::config& cfg) {
+    if (cfg.aux_directory.is_set()) {
+        ((super&) *this) = cfg.aux_directory();
+    } else {
+        ((super&) *this) = "/tmp/scylla-aux";
+    }
+    ctor();
+}
+
+#endif // FEATURE_4
