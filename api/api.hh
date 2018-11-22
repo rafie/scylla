@@ -25,6 +25,9 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
+#ifndef FEATURE_9
+#include <boost/units/detail/utility.hpp>
+#endif // FEATURE_9
 #include "api/api-doc/utils.json.hh"
 #include "utils/histogram.hh"
 #include "http/exception.hh"
@@ -215,5 +218,30 @@ std::vector<T> concat(std::vector<T> a, std::vector<T>&& b) {
     a.insert(a.end(), b.begin(), b.end());
     return a;
 }
+
+#ifndef FEATURE_9
+template <class T, class Base = T>
+class req_param {
+public:
+	sstring name;
+	sstring param;
+	T value;
+
+	req_param(const request& req, sstring name, T default_val) : name(name) {
+		param = req.get_query_param(name);
+		if (param.empty()) {
+			value = default_val;
+			return;
+		}
+		try {
+			value = T{boost::lexical_cast<Base>(param)};
+		} catch (boost::bad_lexical_cast&) {
+			throw bad_param_exception(format("{} ({}): type error - should be {}", name, param, boost::units::detail::demangle(typeid(Base).name())));
+		}
+	}
+
+    operator T() const { return value; }
+};
+#endif // FEATURE_9
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 Clearspring Technologies, Inc. 
+ * Copyright (C) 2011 Clearspring Technologies, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,19 +40,19 @@
 /*
  Based on the following implementation ([2]) for the Space-Saving algorithm from [1].
 
- [1] Metwally, A., Agrawal, D., & El Abbadi, A. (2005, January). 
-     Efficient computation of frequent and top-k elements in data streams. 
+ [1] Metwally, A., Agrawal, D., & El Abbadi, A. (2005, January).
+     Efficient computation of frequent and top-k elements in data streams.
      In International Conference on Database Theory (pp. 398-412). Springer, Berlin, Heidelberg.
      http://www.cse.ust.hk/~raywong/comp5331/References/EfficientComputationOfFrequentAndTop-kElementsInDataStreams.pdf
 
  [2] https://github.com/addthis/stream-lib/blob/master/src/main/java/com/clearspring/analytics/stream/StreamSummary.java
 
- The algorithm keeps a map between keys seen and their counts, keeping a bound on the number of tracked keys. 
- Replacement policy evicts the key with the lowest count while inheriting its count, and recording an estimation 
- of the error which results from that. 
- This error estimation can be later used to prove if the distribution we arrived at corresponds to the real top-K, 
+ The algorithm keeps a map between keys seen and their counts, keeping a bound on the number of tracked keys.
+ Replacement policy evicts the key with the lowest count while inheriting its count, and recording an estimation
+ of the error which results from that.
+ This error estimation can be later used to prove if the distribution we arrived at corresponds to the real top-K,
  which we can display alongside the results.
- Accuracy depends on the number of tracked keys. 
+ Accuracy depends on the number of tracked keys.
 
 */
 
@@ -65,6 +65,7 @@
 
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/sstring.hh>
+#include "utils/chunked_vector.hh"
 
 namespace utils {
 
@@ -81,10 +82,10 @@ private:
         T item;
         unsigned count = 0;
         unsigned error = 0;
-        
+
         counter(T item) : item(item) {}
     };
-    
+
     using counter_ptr = lw_shared_ptr<counter>;
 
     using counters = std::list<counter_ptr>;
@@ -92,7 +93,7 @@ private:
 
     using counters_map = std::unordered_map<T, counters_iterator>;
     using counters_map_iterator = typename counters_map::iterator;
-    
+
     struct bucket {
         std::list<counter_ptr> counters;
         unsigned count;
@@ -102,14 +103,15 @@ private:
             counters.push_back(ctr);
         }
 
-        bucket(T item, unsigned count) {
+        bucket(T item) {
             counters.push_back(make_lw_shared<counter>(item));
-            this->count = count;
+            this->count = 0;
+            // increment_counter() call required to complete bucket construction
         }
     };
 
     using buckets = std::list<bucket>;
-    
+
     size_t _capacity;
     counters_map _counters_map;
     buckets _buckets; // buckets list in ascending order
@@ -121,7 +123,7 @@ public:
 
     size_t capacity() const { return _capacity; }
 
-    size_t size() const { 
+    size_t size() const {
         if (!_valid) {
             throw std::runtime_error("space_saving_top_k state is invalid");
         }
@@ -148,20 +150,19 @@ public:
             counters_iterator counter_it;
             if (is_new_item) {
                 if (size() < _capacity) {
-                    _buckets.emplace_front(bucket(item, 0)); // count set to 0, increment_counter() required to complete bucket construction
+                    _buckets.emplace_front(bucket(std::move(item))); // increment_counter() required to complete bucket construction
                     buckets_iterator new_bucket_it = _buckets.begin();
                     counter_it = new_bucket_it->counters.begin();
                     (*counter_it)->bucket_it = new_bucket_it;
                 } else {
-                    buckets_iterator min_buck = _buckets.begin();
-                    assert(min_buck != _buckets.end());
-                    counter_it = min_buck->counters.begin();
-                    assert(counter_it != min_buck->counters.end());
+                    buckets_iterator min_bucket = _buckets.begin();
+                    assert(min_bucket != _buckets.end());
+                    counter_it = min_bucket->counters.begin();
+                    assert(counter_it != min_bucket->counters.end());
                     counter_ptr ctr = *counter_it;
-                    dropped_item = ctr->item;
-                    _counters_map.erase(*dropped_item);
-                    ctr->item = item;
-                    ctr->error = min_buck->count;
+                    _counters_map.erase(ctr->item);
+                    dropped_item = std::exchange(ctr->item, std::move(item));
+                    ctr->error = min_bucket->count;
                 }
                 _counters_map[item] = std::move(counter_it);
             } else {
@@ -184,7 +185,7 @@ private:
         buckets_iterator old_bucket_it = ctr->bucket_it;
         auto& old_buck = *old_bucket_it;
         old_buck.counters.erase(counter_it);
-        
+
         ctr->count += inc;
 
         buckets_iterator bi_prev = old_bucket_it;
@@ -205,7 +206,7 @@ private:
 
         if (bi_next == _buckets.end()) {
             bucket buck{ctr};
-            counter_it = std::prev(buck.counters.end());
+            counter_it = buck.counters.begin();
             bi_next = _buckets.insert(std::next(bi_prev), std::move(buck));
         }
         ctr->bucket_it = bi_next;
@@ -225,9 +226,9 @@ public:
         unsigned error;
     };
 
-    using results = std::list<result>;
-    
-    results top(unsigned k) const 
+    using results = chunked_vector<result>;
+
+    results top(unsigned k) const
     {
         if (!_valid) {
             throw std::runtime_error("space_saving_top_k state is invalid");
@@ -250,13 +251,13 @@ public:
     //-----------------------------------------------------------------------------------------
     // Diagnostics
 public:
-    template <class TT> 
+    template <class TT>
     friend std::ostream& operator<<(std::ostream& out, const typename space_saving_top_k<TT>::counter& c);
-    template <class TT> 
+    template <class TT>
     friend std::ostream& operator<<(std::ostream& out, const typename space_saving_top_k<TT>::counters_map& counters_map);
-    template <class TT> 
+    template <class TT>
     friend std::ostream& operator<<(std::ostream& out, const typename space_saving_top_k<TT>::buckets& buckets);
-    template <class TT> 
+    template <class TT>
     friend std::ostream& operator<<(std::ostream& out, const space_saving_top_k<TT>& top_k);
 };
 
@@ -273,7 +274,7 @@ std::ostream& operator<<(std::ostream& out, const typename space_saving_top_k<T>
     out << "{\n";
     for (auto const& [item, counter_i]: counters_map) {
         out << item << " => " << **counter_i << "\n";
-    }        
+    }
     out << "}\n";
     return out;
 }

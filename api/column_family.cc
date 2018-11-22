@@ -86,8 +86,7 @@ const utils::UUID& get_uuid(const sstring& name, const database& db) {
     try {
         return db.find_uuid(name.substr(0, pos), name.substr(end));
     } catch (std::out_of_range& e) {
-        throw bad_param_exception("Column family '" + name.substr(0, pos) + ":"
-                + name.substr(end) + "' not found");
+        throw bad_param_exception(format("Column family '{}:{}' not found", name.substr(0, pos), name.substr(end)));
     }
 #endif // FEATURE_7
 }
@@ -321,6 +320,21 @@ ratio_holder filter_recent_false_positive_as_ratio_holder(const sstables::shared
     double f = sst->filter_get_recent_false_positive();
     return ratio_holder(f + sst->filter_get_recent_true_positive(), f);
 }
+
+#ifdef FEATURE_9x
+static unsigned param_to_unsigned(sstring name, sstring param, unsigned default_val) {
+    unsigned val;
+    try {
+        val = boost::lexical_cast<unsigned>(param);
+        if (val == 0) {
+            val = default_val;
+        }
+        return val;
+    } catch (boost::bad_lexical_cast&) {
+        throw bad_param_exception(format("{} ({}) should be numeric", name, param));
+    }
+}
+#endif // FEATURE_9x
 
 void set_column_family(http_context& ctx, routes& r) {
     cf::get_column_family_name.set(r, [&ctx] (const_req req){
@@ -959,32 +973,46 @@ void set_column_family(http_context& ctx, routes& r) {
         });
     });
 
-#ifdef FEATURE_9x
-    cf::start_toppartition_query.set(r, [&ctx] (std::unique_ptr<request> req) {
-        fully_qualified_cf_name kscf(req->param["name"]);
-        auto q = db::toppartition_query::start(ctx.db, kscf.ks, kscf.cf, req->get_query_param("duration"));
-        auto qid = q->id().to_sstring();
-        apilog.info("start_toppartition_query: id={} name={} duration={}", qid, req->param["name"], req->get_query_param("duration"));
-        return make_ready_future<json::json_return_type>(std::map<sstring, sstring>{{"id", qid}});
-    });
-
-    cf::get_toppartition_query_results.set(r, [&ctx] (std::unique_ptr<request> req) {
-        auto qid = req->param["id"];
-        apilog.info("get_toppartition_query_results: id={}", qid);
-        return db::toppartition_query::end(db::toppartition_query::query_id(qid)).then([] (const db::toppartition_query::results& res) {
-            return make_ready_future<json::json_return_type>(res);
-        });
-    });
-#endif // FEATURE_9x
-
 #ifndef FEATURE_9
     cf::toppartitions.set(r, [&ctx] (std::unique_ptr<request> req) {
-        fully_qualified_cf_name kscf(req->param["name"]);
-        apilog.info("toppartitions query: name={} duration={}", req->param["name"], req->get_query_param("duration"));
-        return db::toppartitions_query::run(ctx.db, kscf.ks, kscf.cf, req->get_query_param("duration")).then([](const db::toppartitions_query::results& res) {
-            return make_ready_future<json::json_return_type>(res.to_json());
+        auto name_param = req->param["name"];
+        fully_qualified_cf_name kscf(name_param);
+
+        api::req_param<std::chrono::milliseconds, unsigned> duration{*req, "duration", 1000ms};
+        api::req_param<unsigned> capacity(*req, "capacity", 256);
+        api::req_param<unsigned> list_size(*req, "list_size", 10);
+
+        apilog.info("toppartitions query: name={} duration={} list_size={} capacity={}",
+            name_param, duration.param, list_size.param, capacity.param);
+
+        return seastar::do_with(db::toppartitions_query(ctx.db, kscf.ks, kscf.cf, duration.value, list_size, capacity), [&ctx](auto& q) {
+            return q.scatter().then([&q] {
+                return sleep(q.duration()).then([&q] {
+                    return q.gather(q.capacity()).then([&q] (auto topk_results) {
+                        cf::toppartitions_query_results results;
+
+                        for (auto& d: topk_results.read.top(q.list_size())) {
+                            cf::toppartitions_record r;
+                            r.partition = d.item;
+                            r.count = d.count;
+                            r.error = d.error;
+                            results.read.push(r);
+                        }
+                        for (auto& d: topk_results.write.top(q.list_size())) {
+                            cf::toppartitions_record r;
+                            r.partition = d.item;
+                            r.count = d.count;
+                            r.error = d.error;
+                            results.write.push(r);
+                        }
+                        return make_ready_future<json::json_return_type>(results);
+                    });
+                });
+            });
         });
     });
+
 #endif // FEATURE_9
+
 }
 }

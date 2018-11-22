@@ -641,8 +641,24 @@
                      "allowMultiple":false,
                      "type":"int",
                      "paramType":"query"
-                  }
-               ]
+                  },
+                  {
+                    "name":"list_size",
+                    "description":"number of the top partitions to list",
+                    "required":false,
+                    "allowMultiple":false,
+                    "type":"int",
+                    "paramType":"query"
+                 },
+                 {
+                    "name":"capacity",
+                    "description":"capacity of stream summary",
+                    "required":false,
+                    "allowMultiple":false,
+                    "type":"int",
+                    "paramType":"query"
+                 }
+              ]
             }
          ]
       },

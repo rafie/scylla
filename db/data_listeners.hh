@@ -95,9 +95,6 @@ public:
 
     void install(std::unique_ptr<data_listener> listener);
     void uninstall(const utils::UUID& id);
-#ifndef FEATURE_10
-    future<> uninstall_from_all_shards(seastar::distributed<database>& xdb, const utils::UUID& id);
-#endif // FEATURE_10
 
     virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
             const query::partition_slice& slice, flat_mutation_reader&& rd);
@@ -117,10 +114,11 @@ class toppartitions_data_listener : public partition_counting_listener {
 
     sstring _ks;
     sstring _cf;
-    utils::space_saving_top_k<sstring> _top_k_read, _top_k_write;
+    utils::space_saving_top_k<sstring> _top_k_read;
+    utils::space_saving_top_k<sstring> _top_k_write;
 
     virtual bool is_applicable(const schema_ptr& s) const override {
-        return !!s && s->ks_name() == _ks && s->cf_name() == _cf;
+        return s->ks_name() == _ks && s->cf_name() == _cf;
     }
 
 public:
@@ -138,64 +136,32 @@ public:
     using query_id = utils::UUID;
 
 private:
-    static std::unordered_map<query_id, lw_shared_ptr<toppartitions_query>> _queries;
-
     distributed<database>& _xdb;
     query_id _id;
     sstring _ks;
     sstring _cf;
     std::chrono::milliseconds _duration;
+    size_t _list_size;
+    size_t _capacity;
 
 public:
-    toppartitions_query(seastar::distributed<database>& xdb, sstring ks, sstring cf, std::chrono::milliseconds duration);
-
-    query_id id() const { return _id; }
+    toppartitions_query(seastar::distributed<database>& xdb, sstring ks, sstring cf,
+        std::chrono::milliseconds duration, size_t list_size, size_t capacity);
 
     struct results {
-        utils::space_saving_top_k<sstring> top_k_read, top_k_write;
+        utils::space_saving_top_k<sstring> read;
+        utils::space_saving_top_k<sstring> write;
 
-        //std::vector<record> collect(const utils::space_saving_top_k<sstring>& data) const;
-
-        results(unsigned k = 256) : top_k_read(k), top_k_write(k) {}
-    };
-
-#if 0
-    struct query_results {
-        struct record {
-            sstring partition;
-            sstring count;
-            sstring error;
-        };
-
-        std::vector<record> read;
-        std::vector<record> write;
-
-        query_results(const result&);
-    };
-#endif
-
-        size_t size;
-        utils::space_saving_top_k<sstring> top_k_read, top_k_write;
-
-#if 0
-        std::vector<record> collect(const utils::space_saving_top_k<sstring>& data) const;
-#else
-        results_vec collect(const utils::space_saving_top_k<sstring>& data) const;
-#endif
-
-        results(unsigned k = 256) : size(k),  top_k_read(k), top_k_write(k) {}
-
-        json::json_return_type to_json() const;
-        json_type map() const;
+        results(size_t capacity) : read(capacity), write(capacity) {}
     };
 
     std::chrono::milliseconds duration() const { return _duration; }
+    size_t list_size() const { return _list_size; }
+    size_t capacity() const { return _capacity; }
 
-    static future<toppartitions_query::results> run(seastar::distributed<database>& xdb, sstring ks, sstring cf, sstring duration);
-
-private:
+public:
     future<> scatter();
-    future<toppartitions_query::results> gather(unsigned res_size = 256);
+    future<results> gather(unsigned results_size = 256);
 };
 
 #endif // FEATURE_3
