@@ -71,7 +71,7 @@ namespace utils {
 
 using namespace seastar;
 
-template <class T>
+template <class T, class Hash = std::hash<T>, class KeyEqual = std::equal_to<T>>
 class space_saving_top_k {
 private:
     struct bucket;
@@ -91,7 +91,7 @@ private:
     using counters = std::list<counter_ptr>;
     using counters_iterator = typename counters::iterator;
 
-    using counters_map = std::unordered_map<T, counters_iterator>;
+    using counters_map = std::unordered_map<T, counters_iterator, Hash, KeyEqual>;
     using counters_map_iterator = typename counters_map::iterator;
 
     struct bucket {

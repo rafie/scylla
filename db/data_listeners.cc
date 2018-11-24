@@ -86,14 +86,13 @@ void toppartitions_data_listener::on_read(const schema_ptr& s, const dht::partit
         const query::partition_slice& slice, const dht::decorated_key& dk) {
     dblog.trace("toppartitions_data_listener::on_read: {}.{}", s->ks_name(), s->cf_name());
 
-    _top_k_read.append(to_hex(dk.key().representation()));
+    _top_k_read.append(toppartitons_item_key{s, dk});
 }
 
 void toppartitions_data_listener::on_write(const schema_ptr& s, const frozen_mutation& m) {
     dblog.trace("toppartitions_data_listener::on_write: {}.{}", s->ks_name(), s->cf_name());
 
-    auto pk = m.key(*s);
-    _top_k_write.append(to_hex(pk.representation()));
+    _top_k_write.append(toppartitons_item_key{s, m.decorated_key(*s)});
 }
 
 toppartitions_query::toppartitions_query(distributed<database>& xdb, sstring ks, sstring cf,
@@ -109,7 +108,7 @@ future<> toppartitions_query::scatter() {
     });
 }
 
-using top_t = utils::space_saving_top_k<sstring>::results;
+using top_t = toppartitions_data_listener::top_k::results;
 
 future<toppartitions_query::results> toppartitions_query::gather(unsigned res_size) {
     return _xdb.map_reduce0(

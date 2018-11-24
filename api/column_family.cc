@@ -993,14 +993,14 @@ void set_column_family(http_context& ctx, routes& r) {
 
                         for (auto& d: topk_results.read.top(q.list_size())) {
                             cf::toppartitions_record r;
-                            r.partition = d.item;
+                            r.partition = sstring(d.item);
                             r.count = d.count;
                             r.error = d.error;
                             results.read.push(r);
                         }
                         for (auto& d: topk_results.write.top(q.list_size())) {
                             cf::toppartitions_record r;
-                            r.partition = d.item;
+                            r.partition = sstring(d.item);
                             r.count = d.count;
                             r.error = d.error;
                             results.write.push(r);

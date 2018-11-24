@@ -109,13 +109,39 @@ public:
 
 #ifndef FEATURE_3
 
+class toppartitons_item_key {
+public:
+    toppartitons_item_key(const schema_ptr& schema, const dht::decorated_key& key) : schema(schema), key(key) {}
+
+    schema_ptr schema;
+    dht::decorated_key key;
+
+    struct hash {
+        size_t operator()(const toppartitons_item_key& k) const {
+            return std::hash<dht::token>()(k.key.token());
+        }
+    };
+
+    struct comp {
+        bool operator()(const toppartitons_item_key& k1, const toppartitons_item_key& k2) const {
+            return k1.schema == k2.schema;
+        }
+    };
+
+    operator sstring() const { return to_hex(key.key().representation()); }
+};
+
 class toppartitions_data_listener : public partition_counting_listener {
     friend class toppartitions_query;
 
     sstring _ks;
     sstring _cf;
-    utils::space_saving_top_k<sstring> _top_k_read;
-    utils::space_saving_top_k<sstring> _top_k_write;
+
+public:
+    using top_k = utils::space_saving_top_k<toppartitons_item_key, toppartitons_item_key::hash, toppartitons_item_key::comp>;
+private:
+    top_k _top_k_read;
+    top_k _top_k_write;
 
     virtual bool is_applicable(const schema_ptr& s) const override {
         return s->ks_name() == _ks && s->cf_name() == _cf;
@@ -149,8 +175,8 @@ public:
         std::chrono::milliseconds duration, size_t list_size, size_t capacity);
 
     struct results {
-        utils::space_saving_top_k<sstring> read;
-        utils::space_saving_top_k<sstring> write;
+        toppartitions_data_listener::top_k read;
+        toppartitions_data_listener::top_k write;
 
         results(size_t capacity) : read(capacity), write(capacity) {}
     };
