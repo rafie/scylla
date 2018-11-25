@@ -164,11 +164,32 @@ BOOST_AUTO_TEST_CASE(test_top_k_fail) {
 
 //---------------------------------------------------------------------------------------------
 
+class dk_item {
+public:
+    dk_item(const schema_ptr& schema, const dht::decorated_key& key) : schema(schema), key(key) {}
+
+    schema_ptr schema;
+    dht::decorated_key key;
+
+    struct hash {
+        size_t operator()(const dk_item& k) const {
+            return std::hash<dht::token>()(k.key.token());
+        }
+    };
+
+    struct comp {
+        bool operator()(const dk_item& k1, const dk_item& k2) const {
+            return k1.schema == k2.schema;
+        }
+    };
+};
+
 BOOST_AUTO_TEST_CASE(test_top_k_pkey) {
     simple_schema s;
-    const auto pks = s.make_pkeys(1);
-    utils::space_saving_top_k<partition_key> topk;
-    //topk.append(s[0].key());
+    dht::decorated_key dk = s.make_pkey();
+    std::cout << dk << "\n";
+    utils::space_saving_top_k<dk_item, dk_item::hash, dk_item::comp> topk;
+    topk.append(dk_item(s.schema(), dk));
     BOOST_REQUIRE_EQUAL(1,1);
 }
 

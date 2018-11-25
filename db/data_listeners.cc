@@ -43,16 +43,16 @@ flat_mutation_reader partition_counting_listener::on_read(const schema_ptr& s, c
         });
 }
 
-void data_listeners::install(std::unique_ptr<data_listener> listener) {
-    dblog.debug("data_listeners: install id={}", listener->id().to_sstring());
-    _listeners.push_back(std::move(listener));
+void data_listeners::install(data_listener* listener) {
+    _listeners.push_back(listener);
+    dblog.info("data_listeners: install listener {}", listener);
 }
 
-void data_listeners::uninstall(const utils::UUID& id) {
-    dblog.debug("data_listeners: uninstall id={}", id.to_sstring());
+void data_listeners::uninstall(data_listener* listener) {
     auto it = _listeners.begin();
     while (it != _listeners.end()) {
-        if ((*it)->id() == id) {
+        if (*it == listener) {
+            dblog.info("data_listeners: uninstall listener {}", listener);
             it = _listeners.erase(it);
         } else {
             ++it;
@@ -78,6 +78,15 @@ void data_listeners::on_write(const schema_ptr& s, const frozen_mutation& m) {
     }
 }
 
+bool data_listeners::exists(data_listener* listener) const {
+    for (auto& li: _listeners) {
+        if (&*li == listener) {
+            return true;
+        }
+    }
+    return false;
+}
+
 #endif // FEATURE_2
 
 #ifndef FEATURE_3
@@ -98,14 +107,36 @@ void toppartitions_data_listener::on_write(const schema_ptr& s, const frozen_mut
 toppartitions_query::toppartitions_query(distributed<database>& xdb, sstring ks, sstring cf,
     std::chrono::milliseconds duration, size_t list_size, size_t capacity)
         : _xdb(xdb), _ks(ks), _cf(cf), _duration(duration), _list_size(list_size), _capacity(capacity) {
-    _id = utils::UUID_gen::get_time_UUID();
     dblog.info("toppartitions_query on {}.{}", _ks, _cf);
 }
 
 future<> toppartitions_query::scatter() {
+    /*
     return _xdb.invoke_on_all([&, this] (database& db) {
-        db.data_listeners().install(std::make_unique<toppartitions_data_listener>(_id, _ks, _cf));
+        _listeners.push_back(std::make_shared<toppartitions_data_listener>(_ks, _cf));
+        //data_listener *li = &*_listeners.back();
+        //db.data_listeners().install(li);
     });
+    */
+
+    return _xdb.map_reduce0(
+        [this] (database& db) {
+            auto listener = std::make_unique<toppartitions_data_listener>(this, _ks, _cf);
+            db.data_listeners().install(&*listener);
+            return std::move(listener);
+        },
+        std::vector<std::unique_ptr<toppartitions_data_listener>>{},
+        [this] (auto&& listeners, auto&& listener) {
+            listeners.push_back(std::move(listener));
+            return std::move(listeners);
+        }).then([this](auto&& listeners) {
+            _listeners = std::move(listeners);
+            //for (auto& li: _listeners) {
+            //    dblog.info("toppartitions_query:scatter: listener {}", &*li);
+            //}
+            return make_ready_future<>();
+        });
+
 }
 
 using top_t = toppartitions_data_listener::top_k::results;
@@ -113,16 +144,35 @@ using top_t = toppartitions_data_listener::top_k::results;
 future<toppartitions_query::results> toppartitions_query::gather(unsigned res_size) {
     return _xdb.map_reduce0(
         [res_size, this] (database& db) {
-            for (auto& li: db.data_listeners().listeners()) {
-                if (li->id() != _id) {
+            for (auto& li: _listeners) {
+
+                if (!db.data_listeners().exists(&*li)) {
                     continue;
                 }
-                auto topp_li = dynamic_cast<toppartitions_data_listener*>(&*li);
-                if (!topp_li) {
+
+                /*
+                bool found = false;
+                for (auto& lj: db.data_listeners().listeners()) {
+                    if (&*li == &*lj) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
                     continue;
                 }
-                top_t rd = topp_li->_top_k_read.top(res_size);
-                top_t wr = topp_li->_top_k_write.top(res_size);
+                */
+                //dblog.info("toppartitions_query: listener {} query {}", &*li, li->_query);
+                //if (li->_query != this) {
+                //    continue;
+                //}
+
+                top_t rd = li->_top_k_read.top(res_size);
+                top_t wr = li->_top_k_write.top(res_size);
+
+                //dblog.info("toppartitions_query: uninstall listener {}", dli);
+                db.data_listeners().uninstall(&*li);
+
                 std::tuple<top_t, top_t> t{rd, wr};
                 return std::move(t);
             }

@@ -42,10 +42,10 @@ namespace db {
 
 class data_listener {
 protected:
-    utils::UUID _id;
+    void* _query;
 
 public:
-    data_listener(const utils::UUID& id) : _id(id) {}
+    data_listener(void* query) : _query(query) {}
 
     // Invoked for each write, with partition granularity.
     // The schema_ptr passed is the one which corresponds to the incoming mutation, not the current schema of the table.
@@ -64,27 +64,22 @@ public:
         return std::move(rd);
     }
 
-    const utils::UUID& id() const { return _id; }
     virtual bool is_applicable(const schema_ptr& s) const { return true; }
-
-    static utils::UUID make_id() { return utils::UUID_gen::get_time_UUID(); }
 };
 
 class partition_counting_listener : public data_listener {
 public:
-    partition_counting_listener(const utils::UUID& id) : data_listener(id) {}
+    partition_counting_listener(void* query) : data_listener(query) {}
 
     virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
         const query::partition_slice& slice, flat_mutation_reader&& rd) override;
 
     virtual void on_read(const schema_ptr& s, const dht::partition_range& range,
         const query::partition_slice& slice, const dht::decorated_key& dk) {}
-
-    const utils::UUID& id() const { return _id; }
 };
 
-class data_listeners /*: public data_listener */ {
-    using listeners_list = std::vector<std::unique_ptr<data_listener>>;
+class data_listeners {
+    using listeners_list = std::vector<data_listener*>;
 
 private:
     database& _db;
@@ -93,8 +88,8 @@ private:
 public:
     data_listeners(database& db) : _db(db) {}
 
-    void install(std::unique_ptr<data_listener> listener);
-    void uninstall(const utils::UUID& id);
+    void install(data_listener* listener);
+    void uninstall(data_listener* listener);
 
     virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
             const query::partition_slice& slice, flat_mutation_reader&& rd);
@@ -102,12 +97,16 @@ public:
 
     listeners_list& listeners() { return _listeners; }
 
+    bool exists(data_listener* listener) const;
+
     bool empty() const { return _listeners.empty(); }
 };
 
 #endif // FEATURE_2
 
 #ifndef FEATURE_3
+
+class toppartitions_query;
 
 class toppartitons_item_key {
 public:
@@ -148,8 +147,7 @@ private:
     }
 
 public:
-    toppartitions_data_listener(const utils::UUID& query_id, sstring ks, sstring cf)
-        : partition_counting_listener(query_id), _ks(ks), _cf(cf) {}
+    toppartitions_data_listener(toppartitions_query* query, sstring ks, sstring cf) : partition_counting_listener(query), _ks(ks), _cf(cf) {}
 
     virtual void on_read(const schema_ptr& s, const dht::partition_range& range,
         const query::partition_slice& slice, const dht::decorated_key& dk) override;
@@ -158,17 +156,17 @@ public:
 };
 
 class toppartitions_query {
-public:
-    using query_id = utils::UUID;
+//public:
+    //using query_id = utils::UUID;
 
 private:
     distributed<database>& _xdb;
-    query_id _id;
     sstring _ks;
     sstring _cf;
     std::chrono::milliseconds _duration;
     size_t _list_size;
     size_t _capacity;
+    std::vector<std::unique_ptr<toppartitions_data_listener>> _listeners;
 
 public:
     toppartitions_query(seastar::distributed<database>& xdb, sstring ks, sstring cf,
