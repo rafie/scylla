@@ -21,9 +21,9 @@
 
 #pragma once
 
-#include "seastar/core/distributed.hh"
-#include "seastar/core/future.hh"
-#include "seastar/core/distributed.hh"
+#include <seastar/core/distributed.hh>
+#include <seastar/core/future.hh>
+#include <seastar/core/distributed.hh>
 
 #include "schema.hh"
 #include "flat_mutation_reader.hh"
@@ -41,12 +41,7 @@
 namespace db {
 
 class data_listener {
-protected:
-    void* _query;
-
 public:
-    data_listener(void* query) : _query(query) {}
-
     // Invoked for each write, with partition granularity.
     // The schema_ptr passed is the one which corresponds to the incoming mutation, not the current schema of the table.
     virtual void on_write(const schema_ptr&, const frozen_mutation&) { }
@@ -54,7 +49,7 @@ public:
     // Invoked for each query (both data query and mutation query) when a mutation reader is created.
     // Paging queries may invoke this once for a page, or less often, depending on whether they hit in the querier cache or not.
     //
-    // The mutation_reader passed to this method is the reader from which the query results are built (uncompacted).
+    // The flat_mutation_reader passed to this method is the reader from which the query results are built (uncompacted).
     // This method replaces that reader with the one returned from this method.
     // This allows the listener to install on-the-fly processing for the mutation stream.
     //
@@ -63,27 +58,11 @@ public:
             const query::partition_slice& slice, flat_mutation_reader&& rd) {
         return std::move(rd);
     }
-
-    virtual bool is_applicable(const schema_ptr& s) const { return true; }
-};
-
-class partition_counting_listener : public data_listener {
-public:
-    partition_counting_listener(void* query) : data_listener(query) {}
-
-    virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
-        const query::partition_slice& slice, flat_mutation_reader&& rd) override;
-
-    virtual void on_read(const schema_ptr& s, const dht::partition_range& range,
-        const query::partition_slice& slice, const dht::decorated_key& dk) {}
 };
 
 class data_listeners {
-    using listeners_list = std::vector<data_listener*>;
-
-private:
     database& _db;
-    listeners_list _listeners;
+    std::unordered_map<data_listener*, int> _listeners;
 
 public:
     data_listeners(database& db) : _db(db) {}
@@ -95,18 +74,13 @@ public:
             const query::partition_slice& slice, flat_mutation_reader&& rd);
     virtual void on_write(const schema_ptr& s, const frozen_mutation& m);
 
-    listeners_list& listeners() { return _listeners; }
-
     bool exists(data_listener* listener) const;
-
     bool empty() const { return _listeners.empty(); }
 };
 
 #endif // FEATURE_2
 
 #ifndef FEATURE_3
-
-class toppartitions_query;
 
 class toppartitons_item_key {
 public:
@@ -130,7 +104,7 @@ public:
     operator sstring() const { return to_hex(key.key().representation()); }
 };
 
-class toppartitions_data_listener : public partition_counting_listener {
+class toppartitions_data_listener : public data_listener {
     friend class toppartitions_query;
 
     sstring _ks;
@@ -142,24 +116,16 @@ private:
     top_k _top_k_read;
     top_k _top_k_write;
 
-    virtual bool is_applicable(const schema_ptr& s) const override {
-        return s->ks_name() == _ks && s->cf_name() == _cf;
-    }
-
 public:
-    toppartitions_data_listener(toppartitions_query* query, sstring ks, sstring cf) : partition_counting_listener(query), _ks(ks), _cf(cf) {}
+    toppartitions_data_listener(sstring ks, sstring cf) : _ks(ks), _cf(cf) {}
 
-    virtual void on_read(const schema_ptr& s, const dht::partition_range& range,
-        const query::partition_slice& slice, const dht::decorated_key& dk) override;
+    virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
+            const query::partition_slice& slice, flat_mutation_reader&& rd) override;
 
     virtual void on_write(const schema_ptr& s, const frozen_mutation& m) override;
 };
 
 class toppartitions_query {
-//public:
-    //using query_id = utils::UUID;
-
-private:
     distributed<database>& _xdb;
     sstring _ks;
     sstring _cf;

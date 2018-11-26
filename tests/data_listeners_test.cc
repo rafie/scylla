@@ -31,23 +31,27 @@
 using namespace std;
 using namespace std::chrono_literals;
 
-logging::logger testlog("test"); 
+logging::logger testlog("test");
 
-class table_listener : public db::partition_counting_listener {
+class table_listener : public db::data_listener {
     sstring _cf_name;
 
 public:
-    table_listener(sstring cf_name, const utils::UUID& id) : db::partition_counting_listener(id), 
-        _cf_name(cf_name) {}
+    table_listener(sstring cf_name) : _cf_name(cf_name) {}
 
-    virtual void on_read(const schema_ptr& s, const dht::partition_range& range, 
-            const query::partition_slice& slice, const dht::decorated_key& dk) override {
+    virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
+            const query::partition_slice& slice, flat_mutation_reader&& rd) {
         if (s->cf_name() == _cf_name) {
-            ++read;
+            return make_filtering_reader(std::move(rd), [this, &range, &slice, s = std::move(s)] (const dht::decorated_key& dk) {
+                testlog.info("listener {}: read {}", this, dk);
+                ++read;
+                return true;
+            });
         }
+        return std::move(rd);
     }
 
-    virtual void on_write(const schema_ptr& s, const frozen_mutation& m) override { 
+    virtual void on_write(const schema_ptr& s, const frozen_mutation& m) override {
         if (s->cf_name() == _cf_name) {
             ++write;
         }
@@ -67,12 +71,15 @@ struct results {
 results test_data_listeners(cql_test_env& e, sstring cf_name) {
     testlog.info("starting test_data_listeners");
 
-    auto id = table_listener::make_id();
-    
-    e.db().invoke_on_all([&id, &cf_name] (database& db) {
-        db.data_listeners().install(std::make_unique<table_listener>(cf_name, id));
+    std::vector<std::unique_ptr<table_listener>> listeners;
+
+    e.db().invoke_on_all([&listeners, &cf_name] (database& db) {
+        auto listener = std::make_unique<table_listener>(cf_name);
+        db.data_listeners().install(&*listener);
+        testlog.info("installed listener {}", &*listener);
+        listeners.push_back(std::move(listener));
     }).get();
-    
+
     e.execute_cql("CREATE TABLE t1 (k int, c int, PRIMARY KEY (k, c));").get();
     e.execute_cql("INSERT INTO t1 (k, c) VALUES (1, 1);").get();
     e.execute_cql("INSERT INTO t1 (k, c) VALUES (2, 2);").get();
@@ -80,16 +87,19 @@ results test_data_listeners(cql_test_env& e, sstring cf_name) {
     e.execute_cql("SELECT k, c FROM t1;").get();
 
     auto res = e.db().map_reduce0(
-        [] (database& db) {
-            for (auto& li: db.data_listeners().listeners()) {
-                table_listener* t1_li = dynamic_cast<table_listener*>(&*li);
-                if (t1_li) {
-                    results res{t1_li->read, t1_li->write};
-                    return std::move(res);
+        [&listeners] (database& db) {
+            for (auto& listener: listeners) {
+                auto li = &*listener;
+                if (!db.data_listeners().exists(li)) {
+                    continue;
                 }
+                results res{li->read, li->write};
+                testlog.info("uninstalled listener {}: rd={} wr={}", li, li->read, li->write);
+                db.data_listeners().uninstall(li);
+                return std::move(res);
             }
             return std::move(results{});
-        }, 
+        },
         results{},
         [] (results res, results li_res) {
             res.read += li_res.read;
@@ -97,11 +107,7 @@ results test_data_listeners(cql_test_env& e, sstring cf_name) {
             return std::move(res);
         }).get0();
 
-    testlog.info("test_data_listeners: read={} write={}", res.read, res.write);
-
-    e.db().invoke_on_all([&id] (database& db) {
-        db.data_listeners().uninstall(id);
-    }).get();
+    testlog.info("test_data_listeners: rd={} wr={}", res.read, res.write);
 
     return res;
 }
@@ -112,7 +118,7 @@ SEASTAR_TEST_CASE(test_dlistener_t1) {
         BOOST_REQUIRE_EQUAL(3, res.read);
         BOOST_REQUIRE_EQUAL(3, res.write);
     });
-} 
+}
 
 SEASTAR_TEST_CASE(test_dlistener_t2) {
     return do_with_cql_env_thread([] (auto& e) {
@@ -120,4 +126,4 @@ SEASTAR_TEST_CASE(test_dlistener_t2) {
         BOOST_REQUIRE_EQUAL(0, res.read);
         BOOST_REQUIRE_EQUAL(0, res.write);
     });
-} 
+}

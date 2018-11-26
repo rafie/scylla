@@ -35,72 +35,55 @@ namespace db {
 
 #ifndef FEATURE_2
 
-flat_mutation_reader partition_counting_listener::on_read(const schema_ptr& s, const dht::partition_range& range,
-        const query::partition_slice& slice, flat_mutation_reader&& rd) {
-    return make_filtering_reader(std::move(rd), [this, &range, &slice, s = std::move(s)] (const dht::decorated_key& dk) {
-            this->on_read(s, range, slice, dk);
-            return true;
-        });
-}
-
 void data_listeners::install(data_listener* listener) {
-    _listeners.push_back(listener);
-    dblog.info("data_listeners: install listener {}", listener);
+    _listeners.emplace(listener, 0);
+    dblog.debug("data_listeners: install listener {}", listener);
 }
 
 void data_listeners::uninstall(data_listener* listener) {
-    auto it = _listeners.begin();
-    while (it != _listeners.end()) {
-        if (*it == listener) {
-            dblog.info("data_listeners: uninstall listener {}", listener);
-            it = _listeners.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    dblog.debug("data_listeners: uninstall listener {}", listener);
+    _listeners.extract(listener);
+}
+
+bool data_listeners::exists(data_listener* listener) const {
+    return _listeners.find(listener) != _listeners.end();
 }
 
 flat_mutation_reader data_listeners::on_read(const schema_ptr& s, const dht::partition_range& range,
         const query::partition_slice& slice, flat_mutation_reader&& rd) {
     for (auto&& li : _listeners) {
-        if (li->is_applicable(s)) {
-            rd = li->on_read(s, range, slice, std::move(rd));
-        }
+        rd = li.first->on_read(s, range, slice, std::move(rd));
     }
     return std::move(rd);
 }
 
 void data_listeners::on_write(const schema_ptr& s, const frozen_mutation& m) {
     for (auto&& li : _listeners) {
-        if (li->is_applicable(s)) {
-            li->on_write(s, m);
-        }
+        li.first->on_write(s, m);
     }
-}
-
-bool data_listeners::exists(data_listener* listener) const {
-    for (auto& li: _listeners) {
-        if (&*li == listener) {
-            return true;
-        }
-    }
-    return false;
 }
 
 #endif // FEATURE_2
 
 #ifndef FEATURE_3
 
-void toppartitions_data_listener::on_read(const schema_ptr& s, const dht::partition_range& range,
-        const query::partition_slice& slice, const dht::decorated_key& dk) {
+flat_mutation_reader toppartitions_data_listener::on_read(const schema_ptr& s, const dht::partition_range& range,
+        const query::partition_slice& slice, flat_mutation_reader&& rd) {
+    if (s->ks_name() != _ks || s->cf_name() != _cf) {
+        return std::move(rd);
+    }
     dblog.trace("toppartitions_data_listener::on_read: {}.{}", s->ks_name(), s->cf_name());
-
-    _top_k_read.append(toppartitons_item_key{s, dk});
+    return make_filtering_reader(std::move(rd), [this, &range, &slice, s = std::move(s)] (const dht::decorated_key& dk) {
+            _top_k_read.append(toppartitons_item_key{s, dk});
+            return true;
+        });
 }
 
 void toppartitions_data_listener::on_write(const schema_ptr& s, const frozen_mutation& m) {
+    if (s->ks_name() != _ks || s->cf_name() != _cf) {
+        return;
+    }
     dblog.trace("toppartitions_data_listener::on_write: {}.{}", s->ks_name(), s->cf_name());
-
     _top_k_write.append(toppartitons_item_key{s, m.decorated_key(*s)});
 }
 
@@ -111,17 +94,9 @@ toppartitions_query::toppartitions_query(distributed<database>& xdb, sstring ks,
 }
 
 future<> toppartitions_query::scatter() {
-    /*
-    return _xdb.invoke_on_all([&, this] (database& db) {
-        _listeners.push_back(std::make_shared<toppartitions_data_listener>(_ks, _cf));
-        //data_listener *li = &*_listeners.back();
-        //db.data_listeners().install(li);
-    });
-    */
-
     return _xdb.map_reduce0(
         [this] (database& db) {
-            auto listener = std::make_unique<toppartitions_data_listener>(this, _ks, _cf);
+            auto listener = std::make_unique<toppartitions_data_listener>(_ks, _cf);
             db.data_listeners().install(&*listener);
             return std::move(listener);
         },
@@ -131,9 +106,6 @@ future<> toppartitions_query::scatter() {
             return std::move(listeners);
         }).then([this](auto&& listeners) {
             _listeners = std::move(listeners);
-            //for (auto& li: _listeners) {
-            //    dblog.info("toppartitions_query:scatter: listener {}", &*li);
-            //}
             return make_ready_future<>();
         });
 
@@ -145,32 +117,13 @@ future<toppartitions_query::results> toppartitions_query::gather(unsigned res_si
     return _xdb.map_reduce0(
         [res_size, this] (database& db) {
             for (auto& li: _listeners) {
-
                 if (!db.data_listeners().exists(&*li)) {
                     continue;
                 }
 
-                /*
-                bool found = false;
-                for (auto& lj: db.data_listeners().listeners()) {
-                    if (&*li == &*lj) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    continue;
-                }
-                */
-                //dblog.info("toppartitions_query: listener {} query {}", &*li, li->_query);
-                //if (li->_query != this) {
-                //    continue;
-                //}
-
                 top_t rd = li->_top_k_read.top(res_size);
                 top_t wr = li->_top_k_write.top(res_size);
 
-                //dblog.info("toppartitions_query: uninstall listener {}", dli);
                 db.data_listeners().uninstall(&*li);
 
                 std::tuple<top_t, top_t> t{rd, wr};
@@ -180,13 +133,8 @@ future<toppartitions_query::results> toppartitions_query::gather(unsigned res_si
         },
         results{res_size},
         [this] (results res, std::tuple<top_t, top_t> rd_wr) {
-
-            for (auto& r: std::get<0>(rd_wr)) {
-                res.read.append(r.item, r.count);
-            }
-            for (auto& w: std::get<1>(rd_wr)) {
-                res.write.append(w.item, w.count);
-            }
+            res.read.append(std::get<0>(rd_wr));
+            res.write.append(std::get<1>(rd_wr));
             return std::move(res);
         });
 }
