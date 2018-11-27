@@ -135,6 +135,7 @@ struct bad_boy {
         }
         return n == x.n;
     }
+
     operator unsigned() const { return n; }
 };
 

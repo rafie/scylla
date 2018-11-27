@@ -886,11 +886,11 @@ public:
         return _index_manager;
     }
 
-#ifndef FEATURE_10
+#ifndef FEATURE_5
     db::large_partition_handler* get_large_partition_handler() const {
 #else
     db::large_partition_handler* get_large_partition_handler() {
-#endif // #ifndef FEATURE_10
+#endif // FEATURE_5
         assert(_config.large_partition_handler);
         return _config.large_partition_handler;
     }
@@ -1432,11 +1432,11 @@ public:
         return *_cfg;
     }
 
-#ifndef FEATURE_10
+#ifndef FEATURE_5
     db::large_partition_handler* get_large_partition_handler() const {
 #else
     db::large_partition_handler* get_large_partition_handler() {
-#endif// FEATURE_10
+#endif// FEATURE_5
         return _large_partition_handler.get();
     }
 

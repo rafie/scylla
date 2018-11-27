@@ -29,9 +29,9 @@
 #include "flat_mutation_reader.hh"
 #include "mutation_reader.hh"
 #include "frozen_mutation.hh"
+#ifndef FEATURE_3
 #include "utils/top_k.hh"
-#include "json/json_elements.hh"
-#include "api/api-doc/column_family.json.hh"
+#endif // FEATURE_3
 
 #include <vector>
 #include <unordered_map>
@@ -70,9 +70,9 @@ public:
     void install(data_listener* listener);
     void uninstall(data_listener* listener);
 
-    virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
+    flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
             const query::partition_slice& slice, flat_mutation_reader&& rd);
-    virtual void on_write(const schema_ptr& s, const frozen_mutation& m);
+    void on_write(const schema_ptr& s, const frozen_mutation& m);
 
     bool exists(data_listener* listener) const;
     bool empty() const { return _listeners.empty(); }

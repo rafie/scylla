@@ -31,6 +31,6 @@ using timeout_semaphore = seastar::basic_semaphore<seastar::default_timeout_exce
 static constexpr timeout_clock::time_point no_timeout = timeout_clock::time_point::max();
 }
 
-#ifdef FEATURE_6a
+#ifdef FEATURE_6x
 inline seastar::sstring to_sstring(db::timeout_clock::time_point t) { return seastar::to_sstring(t.time_since_epoch().count()); }
-#endif // FEATURE_6a
+#endif // FEATURE_6x

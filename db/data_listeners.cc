@@ -23,10 +23,6 @@
 #include "database.hh"
 #include "db_clock.hh"
 
-#ifndef FEATURE_3
-#include "api/api-doc/column_family.json.hh"
-#endif // FEATURE_3
-
 #include <tuple>
 
 extern logging::logger dblog;
