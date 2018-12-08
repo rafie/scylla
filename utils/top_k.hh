@@ -80,8 +80,8 @@ private:
     struct counter {
         buckets_iterator bucket_it;
         T item;
-        unsigned count;
-        unsigned error;
+        unsigned count = 0;
+        unsigned error = 0;
 
         counter(T item, unsigned count = 0, unsigned error = 0) : item(item), count(count), error(error) {}
     };

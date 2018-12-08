@@ -2870,7 +2870,7 @@
       },
       "toppartitions_record":{
          "id":"toppartitions_record",
-		 "description":"nodetool toppartitions query record",
+         "description":"nodetool toppartitions query record",
          "properties":{
             "partition":{
                "type":"string",
@@ -2885,10 +2885,10 @@
                "description":"Indication of inaccuracy in counting PKs"
             }
          }
-	  },
+      },
       "toppartitions_query_results":{
          "id":"toppartitions_query_results",
-		 "description":"nodetool toppartitions query results",
+         "description":"nodetool toppartitions query results",
          "properties":{
             "read":{
                "type":"array",
