@@ -82,12 +82,11 @@ public:
 
 #ifndef FEATURE_3
 
-class toppartitons_item_key {
-public:
-    toppartitons_item_key(const schema_ptr& schema, const dht::decorated_key& key) : schema(schema), key(key) {}
-
+struct toppartitons_item_key {
     schema_ptr schema;
     dht::decorated_key key;
+
+    toppartitons_item_key(const schema_ptr& schema, const dht::decorated_key& key) : schema(schema), key(key) {}
 
     struct hash {
         size_t operator()(const toppartitons_item_key& k) const {
@@ -97,16 +96,17 @@ public:
 
     struct comp {
         bool operator()(const toppartitons_item_key& k1, const toppartitons_item_key& k2) const {
-            return k1.schema == k2.schema;
+            return k1.schema == k2.schema && k1.key.equal(*k2.schema, k2.key);
         }
     };
 
-    operator sstring() const { return to_hex(key.key().representation()); }
+    explicit operator sstring() const { return to_hex(key.key().representation()); }
 };
 
-class toppartitions_data_listener : public data_listener {
+class toppartitions_data_listener : public data_listener,  public seastar::async_sharded_service<toppartitions_data_listener> {
     friend class toppartitions_query;
 
+    database& _db;
     sstring _ks;
     sstring _cf;
 
@@ -117,12 +117,16 @@ private:
     top_k _top_k_write;
 
 public:
-    toppartitions_data_listener(sstring ks, sstring cf) : _ks(ks), _cf(cf) {}
+    toppartitions_data_listener(database& db, sstring ks, sstring cf);
+//    toppartitions_data_listener() : _db(*(database*)0) {}
+    ~toppartitions_data_listener();
 
     virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,
             const query::partition_slice& slice, flat_mutation_reader&& rd) override;
 
     virtual void on_write(const schema_ptr& s, const frozen_mutation& m) override;
+
+    future<> stop();
 };
 
 class toppartitions_query {
@@ -132,7 +136,7 @@ class toppartitions_query {
     std::chrono::milliseconds _duration;
     size_t _list_size;
     size_t _capacity;
-    std::vector<std::unique_ptr<toppartitions_data_listener>> _listeners;
+    sharded<toppartitions_data_listener> _query;
 
 public:
     toppartitions_query(seastar::distributed<database>& xdb, sstring ks, sstring cf,
@@ -149,7 +153,6 @@ public:
     size_t list_size() const { return _list_size; }
     size_t capacity() const { return _capacity; }
 
-public:
     future<> scatter();
     future<results> gather(unsigned results_size = 256);
 };
