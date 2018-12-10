@@ -41,35 +41,29 @@ using namespace json;
 namespace cf = httpd::column_family_json;
 
 #ifndef FEATURE_7
-struct fully_qualified_cf_name {
-    sstring ks;
-    sstring cf;
-
-    fully_qualified_cf_name(sstring name) {
-        auto pos = name.find("%3A");
-        size_t end;
+std::tuple<sstring, sstring> parse_fully_qualified_cf_name(sstring name) {
+    auto pos = name.find("%3A");
+    size_t end;
+    if (pos == sstring::npos) {
+        pos  = name.find(":");
         if (pos == sstring::npos) {
-            pos  = name.find(":");
-            if (pos == sstring::npos) {
-                throw bad_param_exception("Column family name should be in keyspace:column_family format");
-            }
-            end = pos + 1;
-        } else {
-            end = pos + 3;
+            throw bad_param_exception("Column family name should be in keyspace:column_family format");
         }
-        ks = name.substr(0, pos);
-        cf = name.substr(end);
+        end = pos + 1;
+    } else {
+        end = pos + 3;
     }
-};
+    return std::make_tuple(name.substr(0, pos), name.substr(end));
+}
 #endif // FEATURE_7
 
 const utils::UUID& get_uuid(const sstring& name, const database& db) {
 #ifndef FEATURE_7
-    fully_qualified_cf_name kscf(name);
+    auto [ks, cf] = parse_fully_qualified_cf_name(name);
     try {
-        return db.find_uuid(kscf.ks, kscf.cf);
+        return db.find_uuid(ks, cf);
     } catch (std::out_of_range& e) {
-        throw bad_param_exception(format("Column family '{}:{}' not found", kscf.ks, kscf.cf));
+        throw bad_param_exception(format("Column family '{}:{}' not found", ks, cf));
     }
 #else
     auto pos = name.find("%3A");
@@ -976,7 +970,7 @@ void set_column_family(http_context& ctx, routes& r) {
 #ifndef FEATURE_9
     cf::toppartitions.set(r, [&ctx] (std::unique_ptr<request> req) {
         auto name_param = req->param["name"];
-        fully_qualified_cf_name kscf(name_param);
+        auto [ks, cf] = parse_fully_qualified_cf_name(name_param);
 
         api::req_param<std::chrono::milliseconds, unsigned> duration{*req, "duration", 1000ms};
         api::req_param<unsigned> capacity(*req, "capacity", 256);
@@ -985,7 +979,7 @@ void set_column_family(http_context& ctx, routes& r) {
         apilog.info("toppartitions query: name={} duration={} list_size={} capacity={}",
             name_param, duration.param, list_size.param, capacity.param);
 
-        return seastar::do_with(db::toppartitions_query(ctx.db, kscf.ks, kscf.cf, duration.value, list_size, capacity), [&ctx](auto& q) {
+        return seastar::do_with(db::toppartitions_query(ctx.db, ks, cf, duration.value, list_size, capacity), [&ctx](auto& q) {
             return q.scatter().then([&q] {
                 return sleep(q.duration()).then([&q] {
                     return q.gather(q.capacity()).then([&q] (auto topk_results) {

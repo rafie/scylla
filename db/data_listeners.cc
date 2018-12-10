@@ -100,35 +100,18 @@ void toppartitions_data_listener::on_write(const schema_ptr& s, const frozen_mut
 }
 
 toppartitions_query::toppartitions_query(distributed<database>& xdb, sstring ks, sstring cf,
-    std::chrono::milliseconds duration, size_t list_size, size_t capacity)
+        std::chrono::milliseconds duration, size_t list_size, size_t capacity)
         : _xdb(xdb), _ks(ks), _cf(cf), _duration(duration), _list_size(list_size), _capacity(capacity) {
     dblog.info("toppartitions_query on {}.{}", _ks, _cf);
 }
 
 future<> toppartitions_query::scatter() {
-#if 1
     return _query.start(std::ref(_xdb), _ks, _cf);
-#else
-    return _xdb.map_reduce0(
-        [this] (database& db) {
-            auto listener = std::make_unique<toppartitions_data_listener>(_ks, _cf);
-            db.data_listeners().install(&listener.get());
-            return std::move(listener);
-        },
-        std::vector<std::unique_ptr<toppartitions_data_listener>>{},
-        [this] (auto&& listeners, auto&& listener) {
-            listeners.push_back(std::move(listener));
-            return std::move(listeners);
-        }).then([this](auto&& listeners) {
-            _listeners = std::move(listeners);
-        });
-#endif
 }
 
 using top_t = toppartitions_data_listener::top_k::results;
 
 future<toppartitions_query::results> toppartitions_query::gather(unsigned res_size) {
-#if 1
     dblog.debug("toppartitions_query::gather");
     return _query.map_reduce0(
         [res_size, this] (toppartitions_data_listener& listener) {
@@ -151,31 +134,6 @@ future<toppartitions_query::results> toppartitions_query::gather(unsigned res_si
                 dblog.debug("toppartitions_query::gather: query stopped");
             });
         });
-#else
-    return _xdb.map_reduce0(
-        [res_size, this] (database& db) {
-            for (auto& li: _listeners) {
-                if (!db.data_listeners().exists(&li.get())) {
-                    continue;
-                }
-
-                top_t rd = li->_top_k_read.top(res_size);
-                top_t wr = li->_top_k_write.top(res_size);
-
-                db.data_listeners().uninstall(&li.get());
-
-                std::tuple<top_t, top_t> t{rd, wr};
-                return std::move(t);
-            }
-            return std::move(std::tuple<top_t, top_t>());
-        },
-        results{res_size},
-        [this] (results res, std::tuple<top_t, top_t> rd_wr) {
-            res.read.append(std::get<0>(rd_wr));
-            res.write.append(std::get<1>(rd_wr));
-            return std::move(res);
-        });
-#endif
 }
 
 #endif // FEATURE_3
