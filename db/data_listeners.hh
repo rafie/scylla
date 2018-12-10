@@ -87,6 +87,7 @@ struct toppartitons_item_key {
     dht::decorated_key key;
 
     toppartitons_item_key(const schema_ptr& schema, const dht::decorated_key& key) : schema(schema), key(key) {}
+    toppartitons_item_key(const toppartitons_item_key& key) noexcept : schema(key.schema), key(key.key) {}
 
     struct hash {
         size_t operator()(const toppartitons_item_key& k) const {
@@ -103,7 +104,7 @@ struct toppartitons_item_key {
     explicit operator sstring() const { return to_hex(key.key().representation()); }
 };
 
-class toppartitions_data_listener : public data_listener,  public seastar::async_sharded_service<toppartitions_data_listener> {
+class toppartitions_data_listener : public data_listener {
     friend class toppartitions_query;
 
     database& _db;
@@ -118,7 +119,6 @@ private:
 
 public:
     toppartitions_data_listener(database& db, sstring ks, sstring cf);
-//    toppartitions_data_listener() : _db(*(database*)0) {}
     ~toppartitions_data_listener();
 
     virtual flat_mutation_reader on_read(const schema_ptr& s, const dht::partition_range& range,

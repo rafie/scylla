@@ -989,6 +989,7 @@ void set_column_family(http_context& ctx, routes& r) {
             return q.scatter().then([&q] {
                 return sleep(q.duration()).then([&q] {
                     return q.gather(q.capacity()).then([&q] (auto topk_results) {
+                        apilog.info("toppartitions query: processing results");
                         cf::toppartitions_query_results results;
 
                         for (auto& d: topk_results.read.top(q.list_size())) {

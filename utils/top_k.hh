@@ -177,7 +177,7 @@ public:
             return {is_new_item, std::move(dropped_item)};
         } catch (...) {
             _valid = false;
-            std::rethrow_exception(std::current_exception());
+            std::throw_with_nested(std::runtime_error("space_saving_top_k::append failed"));
         }
     }
 
