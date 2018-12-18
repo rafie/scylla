@@ -34,7 +34,7 @@
 #endif // FEATURE_3
 
 #include <vector>
-#include <unordered_map>
+#include <set>
 
 #ifndef FEATURE_2
 
@@ -62,7 +62,7 @@ public:
 
 class data_listeners {
     database& _db;
-    std::unordered_map<data_listener*, int> _listeners;
+    std::set<data_listener*> _listeners;
 
 public:
     data_listeners(database& db) : _db(db) {}

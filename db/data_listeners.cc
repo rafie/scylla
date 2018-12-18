@@ -32,30 +32,30 @@ namespace db {
 #ifndef FEATURE_2
 
 void data_listeners::install(data_listener* listener) {
-    _listeners.emplace(listener, 0);
+    _listeners.emplace(listener);
     dblog.debug("data_listeners: install listener {}", listener);
 }
 
 void data_listeners::uninstall(data_listener* listener) {
     dblog.debug("data_listeners: uninstall listener {}", listener);
-    _listeners.extract(listener);
+    _listeners.erase(listener);
 }
 
 bool data_listeners::exists(data_listener* listener) const {
-    return _listeners.find(listener) != _listeners.end();
+    return _listeners.count(listener) != 0;
 }
 
 flat_mutation_reader data_listeners::on_read(const schema_ptr& s, const dht::partition_range& range,
         const query::partition_slice& slice, flat_mutation_reader&& rd) {
     for (auto&& li : _listeners) {
-        rd = li.first->on_read(s, range, slice, std::move(rd));
+        rd = li->on_read(s, range, slice, std::move(rd));
     }
     return std::move(rd);
 }
 
 void data_listeners::on_write(const schema_ptr& s, const frozen_mutation& m) {
     for (auto&& li : _listeners) {
-        li.first->on_write(s, m);
+        li->on_write(s, m);
     }
 }
 
