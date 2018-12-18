@@ -101,7 +101,7 @@ struct toppartitons_item_key {
         }
     };
 
-    explicit operator sstring() const { return to_hex(key.key().representation()); }
+    explicit operator sstring() const;
 };
 
 class toppartitions_data_listener : public data_listener {
@@ -110,6 +110,9 @@ class toppartitions_data_listener : public data_listener {
     database& _db;
     sstring _ks;
     sstring _cf;
+#ifdef FEATURE_11x
+    utils::UUID _schema_id;
+#endif // FEATURE_11x
 
 public:
     using top_k = utils::space_saving_top_k<toppartitons_item_key, toppartitons_item_key::hash, toppartitons_item_key::comp>;

@@ -1489,8 +1489,8 @@ public:
     friend class distributed_loader;
 
 #ifndef FEATURE_10
-   db::data_listeners& data_listeners() const {
-       return *_data_listeners;
+    db::data_listeners& data_listeners() const {
+        return *_data_listeners;
     }
 #endif // FEATURE_10
 };

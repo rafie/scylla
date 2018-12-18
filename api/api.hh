@@ -223,22 +223,22 @@ std::vector<T> concat(std::vector<T> a, std::vector<T>&& b) {
 template <class T, class Base = T>
 class req_param {
 public:
-	sstring name;
-	sstring param;
-	T value;
+    sstring name;
+    sstring param;
+    T value;
 
-	req_param(const request& req, sstring name, T default_val) : name(name) {
-		param = req.get_query_param(name);
-		if (param.empty()) {
-			value = default_val;
-			return;
-		}
-		try {
-			value = T{boost::lexical_cast<Base>(param)};
-		} catch (boost::bad_lexical_cast&) {
-			throw bad_param_exception(format("{} ({}): type error - should be {}", name, param, boost::units::detail::demangle(typeid(Base).name())));
-		}
-	}
+    req_param(const request& req, sstring name, T default_val) : name(name) {
+        param = req.get_query_param(name);
+        if (param.empty()) {
+            value = default_val;
+            return;
+        }
+        try {
+            value = T{boost::lexical_cast<Base>(param)};
+        } catch (boost::bad_lexical_cast&) {
+            throw bad_param_exception(format("{} ({}): type error - should be {}", name, param, boost::units::detail::demangle(typeid(Base).name())));
+        }
+    }
 
     operator T() const { return value; }
 };

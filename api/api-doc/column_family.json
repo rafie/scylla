@@ -617,10 +617,7 @@
             {
                "method":"GET",
                "summary":"Toppartitions query",
-               "type":"array",
-               "items":{
-                  "type":"toppartitions_query_results"
-               },
+               "type":"toppartitions_query_results",
                "nickname":"toppartitions",
                "produces":[
                   "application/json"
@@ -652,7 +649,7 @@
                  },
                  {
                     "name":"capacity",
-                    "description":"capacity of stream summary",
+                    "description":"capacity of stream summary: determines amount of resources used in query processing",
                     "required":false,
                     "allowMultiple":false,
                     "type":"int",
