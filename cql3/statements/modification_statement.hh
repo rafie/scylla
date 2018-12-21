@@ -55,10 +55,8 @@
 #include "cql3/single_column_relation.hh"
 #include "cql3/statements/statement_type.hh"
 
-#include "db/consistency_level.hh"
-
-#include "core/shared_ptr.hh"
-#include "core/future-util.hh"
+#include <seastar/core/shared_ptr.hh>
+#include <seastar/core/future-util.hh>
 
 #include "unimplemented.hh"
 #include "validation.hh"

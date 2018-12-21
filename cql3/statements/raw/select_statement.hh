@@ -50,8 +50,8 @@
 #include "cql3/result_set.hh"
 #include "exceptions/unrecognized_entity_exception.hh"
 #include "service/client_state.hh"
-#include "core/shared_ptr.hh"
-#include "core/distributed.hh"
+#include <seastar/core/shared_ptr.hh>
+#include <seastar/core/distributed.hh>
 #include "validation.hh"
 
 namespace cql3 {
@@ -76,6 +76,7 @@ public:
         const bool _is_distinct;
         const bool _allow_filtering;
         const bool _is_json;
+        bool _bypass_cache;
     public:
         parameters();
         parameters(orderings_type orderings,
@@ -84,10 +85,12 @@ public:
         parameters(orderings_type orderings,
             bool is_distinct,
             bool allow_filtering,
-            bool is_json);
+            bool is_json,
+            bool bypass_cache);
         bool is_distinct() const;
         bool allow_filtering() const;
         bool is_json() const;
+        bool bypass_cache() const;
         orderings_type const& orderings() const;
     };
     template<typename T>

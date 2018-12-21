@@ -20,7 +20,7 @@
  */
 
 #include "message/messaging_service.hh"
-#include "core/distributed.hh"
+#include <seastar/core/distributed.hh>
 #include "gms/failure_detector.hh"
 #include "gms/gossiper.hh"
 #include "service/storage_service.hh"
@@ -31,9 +31,10 @@
 #include "gms/gossiper.hh"
 #include "query-request.hh"
 #include "query-result.hh"
-#include "rpc/rpc.hh"
+#include <seastar/rpc/rpc.hh>
 #include "db/config.hh"
 #include "db/system_keyspace.hh"
+#include "db/view/view_update_backlog.hh"
 #include "dht/i_partitioner.hh"
 #include "range.hh"
 #include "frozen_schema.hh"
@@ -56,6 +57,7 @@
 #include "idl/partition_checksum.dist.hh"
 #include "idl/query.dist.hh"
 #include "idl/cache_temperature.dist.hh"
+#include "idl/view.dist.hh"
 #include "serializer_impl.hh"
 #include "serialization_visitors.hh"
 #include "idl/consistency_level.dist.impl.hh"
@@ -75,8 +77,9 @@
 #include "idl/partition_checksum.dist.impl.hh"
 #include "idl/query.dist.impl.hh"
 #include "idl/cache_temperature.dist.impl.hh"
-#include "rpc/lz4_compressor.hh"
-#include "rpc/multi_algo_compressor_factory.hh"
+#include <seastar/rpc/lz4_compressor.hh>
+#include <seastar/rpc/multi_algo_compressor_factory.hh>
+#include "idl/view.dist.impl.hh"
 #include "partition_range_compat.hh"
 #include "stdx.hh"
 #include <boost/range/adaptor/filtered.hpp>
@@ -279,6 +282,8 @@ void messaging_service::start_listen() {
         so.compressor_factory = &compressor_factory;
     }
     so.streaming_domain = rpc::streaming_domain_type(0x55AA);
+    so.load_balancing_algorithm = server_socket::load_balancing_algorithm::port;
+
     // FIXME: we don't set so.tcp_nodelay, because we can't tell at this point whether the connection will come from a
     //        local or remote datacenter, and whether or not the connection will be used for gossip. We can fix
     //        the first by wrapping its server_socket, but not the second.
@@ -304,6 +309,7 @@ void messaging_service::start_listen() {
                 }
                 listen_options lo;
                 lo.reuse_address = true;
+                lo.lba =  server_socket::load_balancing_algorithm::port;
                 auto addr = make_ipv4_address(ipv4_addr{a.raw_addr(), _ssl_port});
                 return std::make_unique<rpc_protocol_server_wrapper>(*_rpc,
                         so, seastar::tls::listen(_credentials, addr, lo), limits);
@@ -889,24 +895,24 @@ future<> messaging_service::send_counter_mutation(msg_addr id, clock_type::time_
     return send_message_timeout<void>(this, messaging_verb::COUNTER_MUTATION, std::move(id), timeout, std::move(fms), cl, std::move(trace_info));
 }
 
-void messaging_service::register_mutation_done(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id)>&& func) {
+void messaging_service::register_mutation_done(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id, rpc::optional<db::view::update_backlog> backlog)>&& func) {
     register_handler(this, netw::messaging_verb::MUTATION_DONE, std::move(func));
 }
 void messaging_service::unregister_mutation_done() {
     _rpc->unregister_handler(netw::messaging_verb::MUTATION_DONE);
 }
-future<> messaging_service::send_mutation_done(msg_addr id, unsigned shard, response_id_type response_id) {
-    return send_message_oneway(this, messaging_verb::MUTATION_DONE, std::move(id), std::move(shard), std::move(response_id));
+future<> messaging_service::send_mutation_done(msg_addr id, unsigned shard, response_id_type response_id, db::view::update_backlog backlog) {
+    return send_message_oneway(this, messaging_verb::MUTATION_DONE, std::move(id), std::move(shard), std::move(response_id), std::move(backlog));
 }
 
-void messaging_service::register_mutation_failed(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id, size_t num_failed)>&& func) {
+void messaging_service::register_mutation_failed(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id, size_t num_failed, rpc::optional<db::view::update_backlog> backlog)>&& func) {
     register_handler(this, netw::messaging_verb::MUTATION_FAILED, std::move(func));
 }
 void messaging_service::unregister_mutation_failed() {
     _rpc->unregister_handler(netw::messaging_verb::MUTATION_FAILED);
 }
-future<> messaging_service::send_mutation_failed(msg_addr id, unsigned shard, response_id_type response_id, size_t num_failed) {
-    return send_message_oneway(this, messaging_verb::MUTATION_FAILED, std::move(id), std::move(shard), std::move(response_id), num_failed);
+future<> messaging_service::send_mutation_failed(msg_addr id, unsigned shard, response_id_type response_id, size_t num_failed, db::view::update_backlog backlog) {
+    return send_message_oneway(this, messaging_verb::MUTATION_FAILED, std::move(id), std::move(shard), std::move(response_id), num_failed, std::move(backlog));
 }
 
 void messaging_service::register_read_data(std::function<future<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature> (const rpc::client_info&, rpc::opt_time_point t, query::read_command cmd, ::compat::wrapping_partition_range pr, rpc::optional<query::digest_algorithm> oda)>&& func) {

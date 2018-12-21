@@ -44,7 +44,8 @@
 #include "cql3/statements/prepared_statement.hh"
 #include "cql3/restrictions/single_column_restriction.hh"
 #include "validation.hh"
-#include "core/shared_ptr.hh"
+#include "db/consistency_level_validations.hh"
+#include <seastar/core/shared_ptr.hh>
 #include "query-result-reader.hh"
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/algorithm_ext/push_back.hpp>
@@ -284,7 +285,7 @@ modification_statement::read_required_rows(
     }
     auto cl = options.get_consistency();
     try {
-        validate_for_read(keyspace(), cl);
+        validate_for_read(cl);
     } catch (exceptions::invalid_request_exception& e) {
         throw exceptions::invalid_request_exception(format("Write operation require a read but consistency {} is not supported on reads", cl));
     }
@@ -294,11 +295,9 @@ modification_statement::read_required_rows(
     };
 
     // FIXME: we read all collection columns, but could be enhanced just to read the list(s) being RMWed
-    std::vector<column_id> static_cols;
-    boost::range::push_back(static_cols, s->static_columns()
+    auto static_cols = boost::copy_range<query::column_id_vector>(s->static_columns()
         | boost::adaptors::filtered(is_collection) | boost::adaptors::transformed([] (auto&& col) { return col.id; }));
-    std::vector<column_id> regular_cols;
-    boost::range::push_back(regular_cols, s->regular_columns()
+    auto regular_cols = boost::copy_range<query::column_id_vector>(s->regular_columns()
         | boost::adaptors::filtered(is_collection) | boost::adaptors::transformed([] (auto&& col) { return col.id; }));
     query::partition_slice ps(
             *ranges,
@@ -403,9 +402,9 @@ future<>
 modification_statement::execute_without_condition(service::storage_proxy& proxy, service::query_state& qs, const query_options& options) {
     auto cl = options.get_consistency();
     if (is_counter()) {
-        db::validate_counter_for_write(s, cl);
+        db::validate_counter_for_write(*s, cl);
     } else {
-        db::validate_for_write(s->ks_name(), cl);
+        db::validate_for_write(cl);
     }
 
     auto timeout = db::timeout_clock::now() + options.get_timeout_config().*get_timeout_config_selector();

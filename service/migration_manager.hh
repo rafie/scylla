@@ -44,7 +44,7 @@
 #include "service/migration_listener.hh"
 #include "gms/endpoint_state.hh"
 #include "db/schema_tables.hh"
-#include "core/distributed.hh"
+#include <seastar/core/distributed.hh>
 #include "gms/inet_address.hh"
 #include "message/msg_addr.hh"
 #include "utils/UUID.hh"
@@ -110,6 +110,8 @@ public:
     future<> announce_column_family_update(schema_ptr cfm, bool from_thrift, std::vector<view_ptr>&& view_updates, bool announce_locally = false);
 
     future<> announce_new_column_family(schema_ptr cfm, bool announce_locally = false);
+
+    future<> announce_new_column_family(schema_ptr cfm, api::timestamp_type timestamp, bool announce_locally = false);
 
     future<> announce_new_type(user_type new_type, bool announce_locally = false);
 

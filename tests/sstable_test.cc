@@ -22,11 +22,11 @@
 
 #include <boost/test/unit_test.hpp>
 
-#include "core/sstring.hh"
-#include "core/future-util.hh"
-#include "core/align.hh"
-#include "core/do_with.hh"
-#include "core/sleep.hh"
+#include <seastar/core/sstring.hh>
+#include <seastar/core/future-util.hh>
+#include <seastar/core/align.hh>
+#include <seastar/core/do_with.hh>
+#include <seastar/core/sleep.hh>
 #include "sstables/sstables.hh"
 #include "sstables/compaction_manager.hh"
 #include "sstables/key.hh"
@@ -49,48 +49,6 @@ static db::nop_large_partition_handler nop_lp_handler;
 
 bytes as_bytes(const sstring& s) {
     return { reinterpret_cast<const int8_t*>(s.begin()), s.size() };
-}
-
-
-static future<> broken_sst(sstring dir, unsigned long generation) {
-    // Using an empty schema for this function, which is only about loading
-    // a malformed component and checking that it fails.
-    auto s = make_lw_shared(schema({}, "ks", "cf", {}, {}, {}, {}, utf8_type));
-    auto sst = std::make_unique<sstable>(s, dir, generation, la, big);
-    auto fut = sst->load();
-    return std::move(fut).then_wrapped([sst = std::move(sst)] (future<> f) mutable {
-        try {
-            f.get();
-            BOOST_FAIL("expecting exception");
-        } catch (malformed_sstable_exception& e) {
-            // ok
-        }
-        return make_ready_future<>();
-    });
-}
-
-SEASTAR_TEST_CASE(empty_toc) {
-    return broken_sst("tests/sstables/badtoc", 1);
-}
-
-SEASTAR_TEST_CASE(alien_toc) {
-    return broken_sst("tests/sstables/badtoc", 2);
-}
-
-SEASTAR_TEST_CASE(truncated_toc) {
-    return broken_sst("tests/sstables/badtoc", 3);
-}
-
-SEASTAR_TEST_CASE(wrong_format_toc) {
-    return broken_sst("tests/sstables/badtoc", 4);
-}
-
-SEASTAR_TEST_CASE(compression_truncated) {
-    return broken_sst("tests/sstables/badcompression", 1);
-}
-
-SEASTAR_TEST_CASE(compression_bytes_flipped) {
-    return broken_sst("tests/sstables/badcompression", 2);
 }
 
 SEASTAR_TEST_CASE(uncompressed_data) {
@@ -301,14 +259,12 @@ SEASTAR_TEST_CASE(check_statistics_func) {
             statistics& sst1_s = sstables::test(sst1).get_statistics();
             statistics& sst2_s = sstables::test(sst2).get_statistics();
 
-            BOOST_REQUIRE(sst1_s.hash.map.size() == sst2_s.hash.map.size());
+            BOOST_REQUIRE(sst1_s.offsets.elements.size() == sst2_s.offsets.elements.size());
             BOOST_REQUIRE(sst1_s.contents.size() == sst2_s.contents.size());
 
-            return do_for_each(sst1_s.hash.map.begin(), sst1_s.hash.map.end(),
-                    [sst1, sst2, &sst1_s, &sst2_s] (auto val) {
-                BOOST_REQUIRE(val.second == sst2_s.hash.map[val.first]);
-                return make_ready_future<>();
-            });
+            for (auto&& e : boost::combine(sst1_s.offsets.elements, sst2_s.offsets.elements)) {
+                BOOST_REQUIRE(boost::get<0>(e).second ==  boost::get<1>(e).second);
+            }
             // TODO: compare the field contents from both sstables.
         });
     }).then([tmp] {});
@@ -433,37 +389,6 @@ public:
 
     virtual void reset(indexable_element) override { }
 };
-
-SEASTAR_TEST_CASE(uncompressed_row_read_at_once) {
-    return reusable_sst(uncompressed_schema(), uncompressed_dir(), 1).then([] (auto sstp) {
-        return do_with(test_row_consumer(1418656871665302), [sstp] (auto& c) {
-            return sstp->data_consume_rows_at_once(*uncompressed_schema(), c, 0, 95).then([sstp, &c] {
-                BOOST_REQUIRE(c.count_row_start == 1);
-                BOOST_REQUIRE(c.count_cell == 3);
-                BOOST_REQUIRE(c.count_deleted_cell == 0);
-                BOOST_REQUIRE(c.count_row_end == 1);
-                BOOST_REQUIRE(c.count_range_tombstone == 0);
-                return make_ready_future<>();
-            });
-        });
-    });
-}
-
-SEASTAR_TEST_CASE(compressed_row_read_at_once) {
-    auto s = make_lw_shared(schema({}, "ks", "cf", {}, {}, {}, {}, utf8_type));
-    return reusable_sst(std::move(s), "tests/sstables/compressed", 1).then([] (auto sstp) {
-        return do_with(test_row_consumer(1418654707438005), [sstp] (auto& c) {
-            return sstp->data_consume_rows_at_once(*uncompressed_schema(), c, 0, 95).then([sstp, &c] {
-                BOOST_REQUIRE(c.count_row_start == 1);
-                BOOST_REQUIRE(c.count_cell == 3);
-                BOOST_REQUIRE(c.count_deleted_cell == 0);
-                BOOST_REQUIRE(c.count_row_end == 1);
-                BOOST_REQUIRE(c.count_range_tombstone == 0);
-                return make_ready_future<>();
-            });
-        });
-    });
-}
 
 SEASTAR_TEST_CASE(uncompressed_rows_read_one) {
     return reusable_sst(uncompressed_schema(), uncompressed_dir(), 1).then([] (auto sstp) {

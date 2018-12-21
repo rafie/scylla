@@ -60,9 +60,9 @@ enum class application_state {
     SUPPORTED_FEATURES,
     CACHE_HITRATES,
     SCHEMA_TABLES_VERSION,
+    RPC_READY,
+    VIEW_BACKLOG,
     // pad to allow adding new states to existing cluster
-    X4,
-    X5,
     X6,
     X7,
     X8,

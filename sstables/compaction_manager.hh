@@ -21,12 +21,12 @@
 
 #pragma once
 
-#include "core/semaphore.hh"
-#include "core/sstring.hh"
-#include "core/shared_ptr.hh"
-#include "core/gate.hh"
-#include "core/shared_future.hh"
-#include "core/rwlock.hh"
+#include <seastar/core/semaphore.hh>
+#include <seastar/core/sstring.hh>
+#include <seastar/core/shared_ptr.hh>
+#include <seastar/core/gate.hh>
+#include <seastar/core/shared_future.hh>
+#include <seastar/core/rwlock.hh>
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/scheduling.hh>
 #include "log.hh"
@@ -218,6 +218,9 @@ public:
     void register_backlog_tracker(compaction_backlog_tracker& backlog_tracker) {
         _backlog_manager.register_backlog_tracker(backlog_tracker);
     }
+
+    // Propagate replacement of sstables to all ongoing compaction of a given column family
+    void propagate_replacement(column_family*cf, const std::vector<sstables::shared_sstable>& removed, const std::vector<sstables::shared_sstable>& added);
 
     friend class compacting_sstable_registration;
     friend class compaction_weight_registration;

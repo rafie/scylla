@@ -47,12 +47,12 @@
 #include "frozen_mutation.hh"
 #include "supervisor.hh"
 #include "query_result_merger.hh"
-#include "core/do_with.hh"
+#include <seastar/core/do_with.hh>
 #include "message/messaging_service.hh"
 #include "gms/failure_detector.hh"
 #include "gms/gossiper.hh"
 #include "storage_service.hh"
-#include "core/future-util.hh"
+#include <seastar/core/future-util.hh>
 #include "db/read_repair_decision.hh"
 #include "db/config.hh"
 #include "db/batchlog_manager.hh"
@@ -80,7 +80,7 @@
 #include "schema_registry.hh"
 #include "utils/joinpoint.hh"
 #include <seastar/util/lazy.hh>
-#include "core/metrics.hh"
+#include <seastar/core/metrics.hh>
 #include <seastar/core/execution_stage.hh>
 #include "db/timeout_clock.hh"
 #include "multishard_mutation_query.hh"
@@ -137,6 +137,7 @@ public:
     const schema_ptr& schema() {
         return _schema;
     }
+    virtual void release_mutation() = 0;
 };
 
 // different mutation for each destination (for read repairs)
@@ -162,6 +163,11 @@ public:
     virtual bool is_shared() override {
         return false;
     }
+    virtual void release_mutation() override {
+        for (auto&& m : _mutations) {
+            m.second.release();
+        }
+    }
     dht::token& token() {
         return _token;
     }
@@ -184,9 +190,12 @@ public:
     virtual bool is_shared() override {
         return true;
     }
+    virtual void release_mutation() override {
+        _mutation.release();
+    }
 };
 
-class abstract_write_response_handler {
+class abstract_write_response_handler : public seastar::enable_shared_from_this<abstract_write_response_handler> {
 protected:
     storage_proxy::response_id_type _id;
     promise<> _ready; // available when cl is achieved
@@ -210,9 +219,11 @@ protected:
         FAILURE,
     };
     error _error = error::NONE;
-    size_t _failed = 0;
+    size_t _failed = 0; // only failures that may impact consistency
+    size_t _all_failures = 0; // total amount of failures
     size_t _total_endpoints = 0;
     storage_proxy::write_stats& _stats;
+    timer<storage_proxy::clock_type> _expire_timer;
 
 protected:
     virtual bool waited_for(gms::inet_address from) = 0;
@@ -227,7 +238,7 @@ public:
             std::unique_ptr<mutation_holder> mh, std::unordered_set<gms::inet_address> targets, tracing::trace_state_ptr trace_state,
             storage_proxy::write_stats& stats, size_t pending_endpoints = 0, std::vector<gms::inet_address> dead_endpoints = {})
             : _id(p->get_next_response_id()), _proxy(std::move(p)), _trace_state(trace_state), _cl(cl), _type(type), _mutation_holder(std::move(mh)), _targets(std::move(targets)),
-              _dead_endpoints(std::move(dead_endpoints)), _stats(stats) {
+              _dead_endpoints(std::move(dead_endpoints)), _stats(stats), _expire_timer([this] { timeout_cb(); }) {
         // original comment from cassandra:
         // during bootstrap, include pending endpoints in the count
         // or we may fail the consistency level guarantees (see #833, #8058)
@@ -249,10 +260,11 @@ public:
         } else if (_error == error::FAILURE) {
             _ready.set_exception(mutation_write_failure_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _failed, _total_block_for, _type));
         }
-    };
+    }
     bool is_counter() const {
         return _type == db::write_type::COUNTER;
     }
+    // While delayed, a request is not throttled.
     void unthrottle() {
         _stats.background_writes++;
         _stats.background_write_bytes += _mutation_holder->size();
@@ -263,20 +275,23 @@ public:
         _cl_acks += nr;
         if (!_cl_achieved && _cl_acks >= _total_block_for) {
              _cl_achieved = true;
-             if (_proxy->need_throttle_writes()) {
-                 _throttled = true;
-                 _proxy->_throttled_writes.push_back(_id);
-                 ++_stats.throttled_writes;
-             } else {
-                 unthrottle();
-             }
-         }
+            delay([] (abstract_write_response_handler* self) {
+                if (self->_proxy->need_throttle_writes()) {
+                    self->_throttled = true;
+                    self->_proxy->_throttled_writes.push_back(self->_id);
+                    ++self->_stats.throttled_writes;
+                } else {
+                    self->unthrottle();
+                }
+            });
+        }
     }
     virtual bool failure(gms::inet_address from, size_t count) {
         if (waited_for(from)) {
             _failed += count;
             if (_total_block_for + _failed > _total_endpoints) {
                 _error = error::FAILURE;
+                delay([] (abstract_write_response_handler*) { });
                 return true;
             }
         }
@@ -287,6 +302,7 @@ public:
             slogger.trace("Write is not acknowledged by {} replicas after achieving CL", get_targets());
         }
         _error = error::TIMEOUT;
+        // We don't delay request completion after a timeout, but its possible we are currently delaying.
     }
     // return true on last ack
     bool response(gms::inet_address from) {
@@ -298,6 +314,92 @@ public:
             slogger.warn("Receive outdated write ack from {}", from);
         }
         return _targets.size() == 0;
+    }
+    // return true if handler is no longer needed because
+    // CL cannot be reached
+    bool failure_response(gms::inet_address from, size_t count) {
+        auto it = _targets.find(from);
+        if (it == _targets.end()) {
+            // There is a little change we can get outdated reply
+            // if the coordinator was restarted after sending a request and
+            // getting reply back. The chance is low though since initial
+            // request id is initialized to server starting time
+            slogger.warn("Receive outdated write failure from {}", from);
+            return false;
+        }
+        _all_failures += count;
+        // we should not fail CL=ANY requests since they may succeed after
+        // writing hints
+        return _cl != db::consistency_level::ANY && failure(from, count);
+    }
+    void check_for_early_completion() {
+        if (_all_failures == _targets.size()) {
+            // leftover targets are all reported error, so nothing to wait for any longer
+            timeout_cb();
+        }
+    }
+    void expire_at(storage_proxy::clock_type::time_point timeout) {
+        _expire_timer.arm(timeout);
+    }
+    void on_released() {
+        _expire_timer.cancel();
+        _mutation_holder->release_mutation();
+    }
+    void timeout_cb() {
+        if (_cl_achieved || _cl == db::consistency_level::ANY) {
+            // we are here because either cl was achieved, but targets left in the handler are not
+            // responding, so a hint should be written for them, or cl == any in which case
+            // hints are counted towards consistency, so we need to write hints and count how much was written
+            auto hints = _proxy->hint_to_dead_endpoints(_mutation_holder, get_targets(), _type, get_trace_state());
+            signal(hints);
+            if (_cl == db::consistency_level::ANY && hints) {
+                slogger.trace("Wrote hint to satisfy CL.ANY after no replicas acknowledged the write");
+            }
+            if (_cl_achieved) { // For CL=ANY this can still be false
+                for (auto&& ep : get_targets()) {
+                    ++stats().background_replica_writes_failed.get_ep_stat(ep);
+                }
+                stats().background_writes_failed += int(!_targets.empty());
+            }
+        }
+
+        on_timeout();
+        _proxy->remove_response_handler(_id);
+    }
+    db::view::update_backlog max_backlog() {
+        return boost::accumulate(
+                get_targets() | boost::adaptors::transformed([this] (gms::inet_address ep) {
+                    return _proxy->get_backlog_of(ep);
+                }),
+                db::view::update_backlog::no_backlog(),
+                [] (const db::view::update_backlog& lhs, const db::view::update_backlog& rhs) {
+                    return std::max(lhs, rhs);
+                });
+    }
+    std::chrono::microseconds calculate_delay(db::view::update_backlog backlog) {
+        constexpr auto delay_limit_us = 1000000;
+        auto adjust = [] (float x) { return x * x * x; };
+        auto budget = std::min(std::chrono::microseconds(0), std::chrono::microseconds(_expire_timer.get_timeout() - storage_proxy::clock_type::now()));
+        return std::min(
+                budget,
+                std::chrono::microseconds(uint32_t(adjust(backlog.relative_size()) * delay_limit_us)));
+    }
+    // Calculates how much to delay completing the request. The delay adds to the request's inherent latency.
+    template<typename Func>
+    void delay(Func&& on_resume) {
+        auto backlog = max_backlog();
+        auto delay = calculate_delay(backlog);
+        if (delay.count() == 0) {
+            on_resume(this);
+        } else {
+            ++stats().throttled_base_writes;
+            slogger.trace("Delaying user write due to view update backlog {}/{} by {}us",
+                          backlog.current, backlog.max, delay.count());
+            sleep_abortable<seastar::steady_clock_type>(delay).finally([self = shared_from_this(), on_resume = std::forward<Func>(on_resume)] {
+                --self->stats().throttled_base_writes;
+                on_resume(self.get());
+            }).handle_exception_type([] (const seastar::sleep_aborted& ignored) { });
+        }
     }
     future<> wait() {
         return _ready.get_future();
@@ -458,73 +560,80 @@ void storage_proxy::unthrottle() {
        _throttled_writes.pop_front();
        auto it = _response_handlers.find(id);
        if (it != _response_handlers.end()) {
-           it->second.handler->unthrottle();
+           it->second->unthrottle();
        }
    }
 }
 
 storage_proxy::response_id_type storage_proxy::register_response_handler(shared_ptr<abstract_write_response_handler>&& h) {
     auto id = h->id();
-    auto e = _response_handlers.emplace(id, rh_entry(std::move(h), [this, id] {
-        auto& e = _response_handlers.find(id)->second;
-        if (e.handler->_cl_achieved || e.handler->_cl == db::consistency_level::ANY) {
-            // we are here because either cl was achieved, but targets left in the handler are not
-            // responding, so a hint should be written for them, or cl == any in which case
-            // hints are counted towards consistency, so we need to write hints and count how much was written
-            auto hints = hint_to_dead_endpoints(e.handler->_mutation_holder, e.handler->get_targets(), e.handler->_type, e.handler->get_trace_state());
-            e.handler->signal(hints);
-            if (e.handler->_cl == db::consistency_level::ANY && hints) {
-                slogger.trace("Wrote hint to satisfy CL.ANY after no replicas acknowledged the write");
-            }
-            if (e.handler->_cl_achieved) { // For CL=ANY this can still be false
-                for (auto&& ep : e.handler->get_targets()) {
-                    ++e.handler->stats().background_replica_writes_failed.get_ep_stat(ep);
-                }
-                e.handler->stats().background_writes_failed += int(!e.handler->get_targets().empty());
-            }
-        }
-
-        e.handler->on_timeout();
-        remove_response_handler(id);
-    }));
+    auto e = _response_handlers.emplace(id, std::move(h));
     assert(e.second);
     return id;
 }
 
 void storage_proxy::remove_response_handler(storage_proxy::response_id_type id) {
-    _response_handlers.erase(id);
+    auto entry = _response_handlers.find(id);
+    entry->second->on_released();
+    _response_handlers.erase(std::move(entry));
 }
 
-void storage_proxy::got_response(storage_proxy::response_id_type id, gms::inet_address from) {
+
+void storage_proxy::got_response(storage_proxy::response_id_type id, gms::inet_address from, stdx::optional<db::view::update_backlog> backlog) {
     auto it = _response_handlers.find(id);
     if (it != _response_handlers.end()) {
-        tracing::trace(it->second.handler->get_trace_state(), "Got a response from /{}", from);
-        if (it->second.handler->response(from)) {
+        tracing::trace(it->second->get_trace_state(), "Got a response from /{}", from);
+        if (it->second->response(from)) {
             remove_response_handler(id); // last one, remove entry. Will cancel expiration timer too.
+        } else {
+            it->second->check_for_early_completion();
         }
+    }
+    maybe_update_view_backlog_of(std::move(from), std::move(backlog));
+}
+
+void storage_proxy::got_failure_response(storage_proxy::response_id_type id, gms::inet_address from, size_t count, stdx::optional<db::view::update_backlog> backlog) {
+    auto it = _response_handlers.find(id);
+    if (it != _response_handlers.end()) {
+        tracing::trace(it->second->get_trace_state(), "Got {} failures from /{}", count, from);
+        if (it->second->failure_response(from, count)) {
+            remove_response_handler(id);
+        } else {
+            it->second->check_for_early_completion();
+        }
+    }
+    maybe_update_view_backlog_of(std::move(from), std::move(backlog));
+}
+
+void storage_proxy::maybe_update_view_backlog_of(gms::inet_address replica, stdx::optional<db::view::update_backlog> backlog) {
+    if (backlog) {
+        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        _view_update_backlogs[replica] = {std::move(*backlog), now};
     }
 }
 
-void storage_proxy::got_failure_response(storage_proxy::response_id_type id, gms::inet_address from, size_t count) {
-    auto it = _response_handlers.find(id);
-    if (it != _response_handlers.end()) {
-        tracing::trace(it->second.handler->get_trace_state(), "Got {} failures from /{}", count, from);
-        if (it->second.handler->failure(from, count)) {
-            remove_response_handler(id); // last one, remove entry. Will cancel expiration timer too.
-        }
+db::view::update_backlog storage_proxy::get_view_update_backlog() const {
+    auto memory_backlog = get_db().local().get_view_update_backlog();
+    auto hints_backlog = db::view::update_backlog{_hints_for_views_manager.backlog_size(), _hints_for_views_manager.max_backlog_size()};
+    return _max_view_update_backlog.add_fetch(engine().cpu_id(), std::max(memory_backlog, hints_backlog));
+}
+
+db::view::update_backlog storage_proxy::get_backlog_of(gms::inet_address ep) const {
+    auto it = _view_update_backlogs.find(ep);
+    if (it == _view_update_backlogs.end()) {
+        return db::view::update_backlog::no_backlog();
     }
+    return it->second.backlog;
 }
 
 future<> storage_proxy::response_wait(storage_proxy::response_id_type id, clock_type::time_point timeout) {
-    auto& e = _response_handlers.find(id)->second;
-
-    e.expire_timer.arm(timeout);
-
-    return e.handler->wait();
+    auto& handler = _response_handlers.find(id)->second;
+    handler->expire_at(timeout);
+    return handler->wait();
 }
 
 ::shared_ptr<abstract_write_response_handler>& storage_proxy::get_write_response_handler(storage_proxy::response_id_type id) {
-        return _response_handlers.find(id)->second.handler;
+        return _response_handlers.find(id)->second;
 }
 
 storage_proxy::response_id_type storage_proxy::create_write_response_handler(keyspace& ks, db::consistency_level cl, db::write_type type, std::unique_ptr<mutation_holder> m,
@@ -656,13 +765,14 @@ void storage_proxy_stats::split_stats::register_metrics_for(gms::inet_address ep
 using namespace std::literals::chrono_literals;
 
 storage_proxy::~storage_proxy() {}
-storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cfg)
+storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cfg, db::view::node_update_backlog& max_view_update_backlog)
     : _db(db)
     , _next_response_id(std::chrono::system_clock::now().time_since_epoch()/1ms)
     , _hints_resource_manager(cfg.available_memory / 10)
     , _hints_for_views_manager(_db.local().get_config().data_file_directories()[0] + "/view_pending_updates", {}, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
     , _background_write_throttle_threahsold(cfg.available_memory / 10)
-    , _mutate_stage{"storage_proxy_mutate", &storage_proxy::do_mutate} {
+    , _mutate_stage{"storage_proxy_mutate", &storage_proxy::do_mutate}
+    , _max_view_update_backlog(max_view_update_backlog) {
     namespace sm = seastar::metrics;
     _metrics.add_group(COORDINATOR_STATS_CATEGORY, {
         sm::make_histogram("read_latency", sm::description("The general read latency histogram"), [this]{ return _stats.estimated_read.get_histogram(16, 20);}),
@@ -676,8 +786,11 @@ storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cf
         sm::make_queue_length("current_throttled_writes", [this] { return _throttled_writes.size(); },
                        sm::description("number of currently throttled write requests")),
 
+        sm::make_queue_length("current_throttled_base_writes", [this] { return _stats.throttled_base_writes; },
+                       sm::description("number of currently throttled base replica write requests")),
+
         sm::make_total_operations("throttled_writes", [this] { return _stats.throttled_writes; },
-                       sm::description("number of throttled write requests")),
+                                  sm::description("number of throttled write requests")),
 
         sm::make_current_bytes("queued_write_bytes", [this] { return _stats.queued_write_bytes; },
                        sm::description("number of bytes in pending write requests")),
@@ -772,8 +885,6 @@ storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cf
     _hints_for_views_manager.register_metrics("hints_for_views_manager");
     _hints_resource_manager.register_manager(_hints_for_views_manager);
 }
-
-storage_proxy::rh_entry::rh_entry(shared_ptr<abstract_write_response_handler>&& h, std::function<void()>&& cb) : handler(std::move(h)), expire_timer(std::move(cb)) {}
 
 storage_proxy::unique_response_handler::unique_response_handler(storage_proxy& p_, response_id_type id_) : id(id_), p(p_) {}
 storage_proxy::unique_response_handler::unique_response_handler(unique_response_handler&& x) : id(x.id), p(x.p) { x.id = 0; };
@@ -1672,8 +1783,17 @@ future<> storage_proxy::send_to_endpoint(
     utils::latency_counter lc;
     lc.start();
 
-    // View updates use consistency level ANY in order to fall back to hinted handoff in case of a failed update
-    db::consistency_level cl = (type == db::write_type::VIEW) ? db::consistency_level::ANY : db::consistency_level::ONE;
+    stdx::optional<clock_type::time_point> timeout;
+    db::consistency_level cl;
+    if (type == db::write_type::VIEW) {
+        // View updates use consistency level ANY in order to fall back to hinted handoff in case of a failed update.
+        // They also have a near-infinite timeout to avoid incurring the extra work of writting hints and to apply
+        // backpressure.
+        timeout = clock_type::now() + 5min;
+        cl = db::consistency_level::ANY;
+    } else {
+        cl = db::consistency_level::ONE;
+    }
     return mutate_prepare(std::array{std::move(m)}, cl, type,
             [this, target = std::array{target}, pending_endpoints = std::move(pending_endpoints), &stats] (
                 std::unique_ptr<mutation_holder>& m,
@@ -1700,8 +1820,8 @@ future<> storage_proxy::send_to_endpoint(
             std::move(dead_endpoints),
             nullptr,
             stats);
-    }).then([this, cl] (std::vector<unique_response_handler> ids) {
-        return mutate_begin(std::move(ids), cl);
+    }).then([this, cl, timeout = std::move(timeout)] (std::vector<unique_response_handler> ids) mutable {
+        return mutate_begin(std::move(ids), cl, std::move(timeout));
     }).then_wrapped([p = shared_from_this(), lc, &stats] (future<>&& f) {
         return p->mutate_end(std::move(f), lc, stats, nullptr);
     });
@@ -1732,33 +1852,6 @@ future<> storage_proxy::send_to_endpoint(
             std::move(pending_endpoints),
             type,
             stats);
-}
-
-future<> storage_proxy::send_to_endpoint(
-        mutation m,
-        gms::inet_address target,
-        std::vector<gms::inet_address> pending_endpoints,
-        db::write_type type,
-        write_stats& stats) {
-    return send_to_endpoint(
-            std::make_unique<shared_mutation>(m),
-            std::move(target),
-            std::move(pending_endpoints),
-            type,
-            stats);
-}
-
-future<> storage_proxy::send_to_endpoint(
-        mutation m,
-        gms::inet_address target,
-        std::vector<gms::inet_address> pending_endpoints,
-        db::write_type type) {
-    return send_to_endpoint(
-            std::make_unique<shared_mutation>(m),
-            std::move(target),
-            std::move(pending_endpoints),
-            type,
-            _stats);
 }
 
 /**
@@ -1807,7 +1900,7 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
         return mutate_locally(std::move(s), *m, timeout).then([response_id, this, my_address, m, h = std::move(handler_ptr), p = shared_from_this()] {
             // make mutation alive until it is processed locally, otherwise it
             // may disappear if write timeouts before this future is ready
-            got_response(response_id, my_address);
+            got_response(response_id, my_address, get_view_update_backlog());
         });
     };
 
@@ -1841,7 +1934,7 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
         lw_shared_ptr<const frozen_mutation> m = handler.get_mutation_for(coordinator);
 
         if (!m || (handler.is_counter() && coordinator == my_address)) {
-            got_response(response_id, coordinator);
+            got_response(response_id, coordinator, stdx::nullopt);
         } else {
             if (!handler.read_repair_write()) {
                 ++stats.writes_attempts.get_ep_stat(coordinator);
@@ -1858,7 +1951,7 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
 
         f.handle_exception([response_id, forward_size, coordinator, handler_ptr, p = shared_from_this(), &stats] (std::exception_ptr eptr) {
             ++stats.writes_errors.get_ep_stat(coordinator);
-            p->got_failure_response(response_id, coordinator, forward_size + 1);
+            p->got_failure_response(response_id, coordinator, forward_size + 1, stdx::nullopt);
             try {
                 std::rethrow_exception(eptr);
             } catch(rpc::closed_error&) {
@@ -4063,7 +4156,7 @@ void storage_proxy::init_messaging_service() {
                     return get_schema_for_write(m.schema_version(), netw::messaging_service::msg_addr{reply_to, shard}).then([&m, &p, timeout] (schema_ptr s) {
                         return p->mutate_locally(std::move(s), m, timeout);
                     });
-                }).then([reply_to, shard, response_id, trace_state_ptr] () {
+                }).then([&p, reply_to, shard, response_id, trace_state_ptr] () {
                     auto& ms = netw::get_local_messaging_service();
                     // We wait for send_mutation_done to complete, otherwise, if reply_to is busy, we will accumulate
                     // lots of unsent responses, which can OOM our shard.
@@ -4071,7 +4164,11 @@ void storage_proxy::init_messaging_service() {
                     // Usually we will return immediately, since this work only involves appending data to the connection
                     // send buffer.
                     tracing::trace(trace_state_ptr, "Sending mutation_done to /{}", reply_to);
-                    return ms.send_mutation_done(netw::messaging_service::msg_addr{reply_to, shard}, shard, response_id).then_wrapped([] (future<> f) {
+                    return ms.send_mutation_done(
+                            netw::messaging_service::msg_addr{reply_to, shard},
+                            shard,
+                            response_id,
+                            p->get_view_update_backlog()).then_wrapped([] (future<> f) {
                         f.ignore_ready_future();
                     });
                 }).handle_exception([reply_to, shard, &p, &errors] (std::exception_ptr eptr) {
@@ -4099,14 +4196,19 @@ void storage_proxy::init_messaging_service() {
                         f.ignore_ready_future();
                     });
                 })
-            ).then_wrapped([trace_state_ptr, reply_to, shard, response_id, &errors] (future<std::tuple<future<>, future<>>>&& f) {
+            ).then_wrapped([trace_state_ptr, reply_to, shard, response_id, &errors, &p] (future<std::tuple<future<>, future<>>>&& f) {
                 // ignore results, since we'll be returning them via MUTATION_DONE/MUTATION_FAILURE verbs
                 auto fut = make_ready_future<seastar::rpc::no_wait_type>(netw::messaging_service::no_wait());
                 if (errors) {
                     if (get_local_storage_service().cluster_supports_write_failure_reply()) {
                         tracing::trace(trace_state_ptr, "Sending mutation_failure with {} failures to /{}", errors, reply_to);
                         auto& ms = netw::get_local_messaging_service();
-                        fut = ms.send_mutation_failed(netw::messaging_service::msg_addr{reply_to, shard}, shard, response_id, errors).then_wrapped([] (future<> f) {
+                        fut = ms.send_mutation_failed(
+                                netw::messaging_service::msg_addr{reply_to, shard},
+                                shard,
+                                response_id,
+                                errors,
+                                p->get_view_update_backlog()).then_wrapped([] (future<> f) {
                             f.ignore_ready_future();
                             return netw::messaging_service::no_wait();
                         });
@@ -4118,19 +4220,19 @@ void storage_proxy::init_messaging_service() {
             });
         });
     });
-    ms.register_mutation_done([this] (const rpc::client_info& cinfo, unsigned shard, storage_proxy::response_id_type response_id) {
+    ms.register_mutation_done([this] (const rpc::client_info& cinfo, unsigned shard, storage_proxy::response_id_type response_id, rpc::optional<db::view::update_backlog> backlog) {
         auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
         _stats.replica_cross_shard_ops += shard != engine().cpu_id();
-        return get_storage_proxy().invoke_on(shard, [from, response_id] (storage_proxy& sp) {
-            sp.got_response(response_id, from);
+        return get_storage_proxy().invoke_on(shard, [from, response_id, backlog = std::move(backlog)] (storage_proxy& sp) mutable {
+            sp.got_response(response_id, from, std::move(backlog));
             return netw::messaging_service::no_wait();
         });
     });
-    ms.register_mutation_failed([this] (const rpc::client_info& cinfo, unsigned shard, storage_proxy::response_id_type response_id, size_t num_failed) {
+    ms.register_mutation_failed([this] (const rpc::client_info& cinfo, unsigned shard, storage_proxy::response_id_type response_id, size_t num_failed, rpc::optional<db::view::update_backlog> backlog) {
         auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
         _stats.replica_cross_shard_ops += shard != engine().cpu_id();
-        return get_storage_proxy().invoke_on(shard, [from, response_id, num_failed] (storage_proxy& sp) {
-            sp.got_failure_response(response_id, from, num_failed);
+        return get_storage_proxy().invoke_on(shard, [from, response_id, num_failed, backlog = std::move(backlog)] (storage_proxy& sp) mutable {
+            sp.got_failure_response(response_id, from, num_failed, std::move(backlog));
             return netw::messaging_service::no_wait();
         });
     });

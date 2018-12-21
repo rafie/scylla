@@ -23,6 +23,7 @@
 #include "service/priority_manager.hh"
 #include "tests/simple_schema.hh"
 #include "tests/cql_test_env.hh"
+#include "db/config.hh"
 
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
@@ -76,6 +77,7 @@ private:
     query::querier_cache::stats _expected_stats;
 
     simple_schema _s;
+    reader_concurrency_semaphore _sem;
     query::querier_cache _cache;
     const std::vector<mutation> _mutations;
     const mutation_source _mutation_source;
@@ -157,7 +159,8 @@ public:
     };
 
     test_querier_cache(const noncopyable_function<sstring(size_t)>& external_make_value, std::chrono::seconds entry_ttl = 24h, size_t cache_size = 100000)
-        : _cache(cache_size, entry_ttl)
+        : _sem(reader_concurrency_semaphore::no_limits{})
+        , _cache(_sem, cache_size, entry_ttl)
         , _mutations(make_mutations(_s, external_make_value))
         , _mutation_source([this] (schema_ptr, const dht::partition_range& range) {
             auto rd = flat_mutation_reader_from_mutations(_mutations, range);
@@ -180,6 +183,10 @@ public:
 
     const schema_ptr get_schema() const {
         return _s.schema();
+    }
+
+    reader_concurrency_semaphore& get_semaphore() {
+        return _sem;
     }
 
     dht::partition_range make_partition_range(bound begin, bound end) const {
@@ -311,6 +318,11 @@ public:
 
         _cache.lookup_mutation_querier(make_cache_key(lookup_key), lookup_schema, lookup_range, lookup_slice, nullptr);
         BOOST_REQUIRE_EQUAL(_cache.get_stats().lookups, ++_expected_stats.lookups);
+        return *this;
+    }
+
+    test_querier_cache& evict_all_for_table() {
+        _cache.evict_all_for_table(get_schema()->id());
         return *this;
     }
 
@@ -650,25 +662,22 @@ SEASTAR_THREAD_TEST_CASE(test_resources_based_cache_eviction) {
                 nullptr,
                 db::no_timeout).get();
 
-        // Make a fake keyspace just to obtain the configuration and
-        // thus the concurrency semaphore.
-        const auto dummy_ks_metadata = keyspace_metadata("dummy_ks", "SimpleStrategy", {{"replication_factor", "1"}}, false);
-        auto cfg = db.make_keyspace_config(dummy_ks_metadata);
+        auto& semaphore = db.user_read_concurrency_sem();
 
-        BOOST_REQUIRE_EQUAL(db.get_querier_cache_stats().resource_based_evictions, 0);
+        BOOST_CHECK_EQUAL(db.get_querier_cache_stats().resource_based_evictions, 0);
 
         // Drain all resources of the semaphore
         std::vector<lw_shared_ptr<reader_concurrency_semaphore::reader_permit>> permits;
-        const auto resources = cfg.read_concurrency_semaphore->available_resources();
+        const auto resources = semaphore.available_resources();
         permits.reserve(resources.count);
         const auto per_permit_memory  = resources.memory / resources.count;
 
         for (int i = 0; i < resources.count; ++i) {
-            permits.emplace_back(cfg.read_concurrency_semaphore->wait_admission(per_permit_memory).get0());
+            permits.emplace_back(semaphore.wait_admission(per_permit_memory).get0());
         }
 
-        BOOST_REQUIRE_EQUAL(cfg.read_concurrency_semaphore->available_resources().count, 0);
-        BOOST_REQUIRE(cfg.read_concurrency_semaphore->available_resources().memory < per_permit_memory);
+        BOOST_CHECK_EQUAL(semaphore.available_resources().count, 0);
+        BOOST_CHECK(semaphore.available_resources().memory < per_permit_memory);
 
         auto cmd2 = query::read_command(s->id(),
                 s->version(),
@@ -687,7 +696,7 @@ SEASTAR_THREAD_TEST_CASE(test_resources_based_cache_eviction) {
                 nullptr,
                 db::no_timeout).get();
 
-        BOOST_REQUIRE_EQUAL(db.get_querier_cache_stats().resource_based_evictions, 1);
+        BOOST_CHECK_EQUAL(db.get_querier_cache_stats().resource_based_evictions, 1);
 
         // We want to read the entire partition so that the querier
         // is not saved at the end and thus ensure it is destroyed.
@@ -705,4 +714,43 @@ SEASTAR_THREAD_TEST_CASE(test_resources_based_cache_eviction) {
                 db::no_timeout).get();
         return make_ready_future<>();
     }, std::move(db_cfg)).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_evict_all_for_table) {
+    test_querier_cache t;
+
+    const auto entry = t.produce_first_page_and_save_mutation_querier();
+
+    t.evict_all_for_table();
+    t.assert_cache_lookup_mutation_querier(entry.key, *t.get_schema(), entry.expected_range, entry.expected_slice)
+        .misses()
+        .no_drops()
+        .no_evictions();
+
+    // Check that the querier was removed from the semaphore too.
+    BOOST_CHECK(!t.get_semaphore().try_evict_one_inactive_read());
+}
+
+SEASTAR_THREAD_TEST_CASE(test_immediate_evict_on_insert) {
+    test_querier_cache t;
+
+    auto& sem = t.get_semaphore();
+
+    auto permit1 = sem.consume_resources(reader_concurrency_semaphore::resources(sem.available_resources().count, 0));
+
+    BOOST_CHECK_EQUAL(sem.available_resources().count, 0);
+
+    auto permit2_fut = sem.wait_admission(1);
+
+    BOOST_CHECK_EQUAL(sem.waiters(), 1);
+
+    const auto entry = t.produce_first_page_and_save_mutation_querier();
+    t.assert_cache_lookup_mutation_querier(entry.key, *t.get_schema(), entry.expected_range, entry.expected_slice)
+        .misses()
+        .no_drops()
+        .resource_based_evictions();
+
+    permit1.release();
+
+    permit2_fut.get();
 }

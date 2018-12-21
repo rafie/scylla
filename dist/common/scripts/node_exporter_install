@@ -1,4 +1,5 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 #
 # Copyright 2018 ScyllaDB
 #
@@ -25,7 +26,7 @@ import tempfile
 import tarfile
 from scylla_util import *
 
-VERSION='0.14.0'
+VERSION='0.17.0'
 INSTALL_DIR='/usr/lib/scylla/Prometheus/node_exporter'
 
 if __name__ == '__main__':

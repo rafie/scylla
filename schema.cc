@@ -193,7 +193,9 @@ const std::vector<column_definition>& v3_columns::all_columns() const {
 void schema::rebuild() {
     _partition_key_type = make_lw_shared<compound_type<>>(get_column_types(partition_key_columns()));
     _clustering_key_type = make_lw_shared<compound_prefix>(get_column_types(clustering_key_columns()));
-
+    _clustering_key_size = column_offset(column_kind::static_column) - column_offset(column_kind::clustering_key);
+    _regular_column_count = _raw._columns.size() - column_offset(column_kind::regular_column);
+    _static_column_count = column_offset(column_kind::regular_column) - column_offset(column_kind::static_column);
     _columns_by_name.clear();
 
     for (const column_definition& def : all_columns()) {
@@ -711,7 +713,7 @@ schema_builder& schema_builder::with_column(bytes name, data_type type, column_k
     return *this;
 }
 
-schema_builder& schema_builder::without_column(bytes name)
+schema_builder& schema_builder::remove_column(bytes name)
 {
     auto it = boost::range::find_if(_raw._columns, [&] (auto& column) {
         return column.name() == name;
@@ -736,7 +738,7 @@ schema_builder& schema_builder::without_column(sstring name, data_type type, api
     return *this;
 }
 
-schema_builder& schema_builder::with_column_rename(bytes from, bytes to)
+schema_builder& schema_builder::rename_column(bytes from, bytes to)
 {
     auto it = std::find_if(_raw._columns.begin(), _raw._columns.end(), [&] (auto& col) {
         return col.name() == from;
@@ -748,7 +750,7 @@ schema_builder& schema_builder::with_column_rename(bytes from, bytes to)
     return with_column(new_def);
 }
 
-schema_builder& schema_builder::with_altered_column_type(bytes name, data_type new_type)
+schema_builder& schema_builder::alter_column_type(bytes name, data_type new_type)
 {
     auto it = boost::find_if(_raw._columns, [&name] (auto& c) { return c.name() == name; });
     assert(it != _raw._columns.end());
@@ -1138,21 +1140,6 @@ schema::columns_count(column_kind kind) const {
 column_count_type
 schema::partition_key_size() const {
     return column_offset(column_kind::clustering_key);
-}
-
-column_count_type
-schema::clustering_key_size() const {
-    return column_offset(column_kind::static_column) - column_offset(column_kind::clustering_key);
-}
-
-column_count_type
-schema::static_columns_count() const {
-    return column_offset(column_kind::regular_column) - column_offset(column_kind::static_column);
-}
-
-column_count_type
-schema::regular_columns_count() const {
-    return _raw._columns.size() - column_offset(column_kind::regular_column);
 }
 
 schema::const_iterator_range_type

@@ -38,7 +38,7 @@
 
 #pragma once
 
-#include "core/sstring.hh"
+#include <seastar/core/sstring.hh>
 #include "utils/serialization.hh"
 #include "utils/UUID.hh"
 #include "version_generator.hh"
@@ -246,6 +246,9 @@ public:
             return versioned_value(hitrates);
         }
 
+        versioned_value cql_ready(bool value) {
+            return versioned_value(to_sstring(int(value)));
+        }
     };
 }; // class versioned_value
 

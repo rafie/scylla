@@ -80,19 +80,18 @@ public:
         }
     }
 
-    result apply(const clustering_row& cr) {
-        bool inside_requested_ranges = _walker.advance_to(cr.position());
+    result apply(position_in_partition_view pos) {
+        if (is_after_fwd_window(pos)) {
+            // This happens only when fwd is set
+            _out_of_range = true;
+            return result::store_and_finish;
+        }
+        bool inside_requested_ranges = _walker.advance_to(pos);
         _out_of_range |= _walker.out_of_range();
         if (!inside_requested_ranges) {
             return result::ignore;
         }
-        if (is_after_fwd_window(cr.position())) {
-            // This happens only when fwd is set
-            _out_of_range = true;
-            return result::store_and_finish;
-        } else {
-            return result::emit;
-        }
+        return result::emit;
     }
 
     result apply(const range_tombstone& rt) {
@@ -154,8 +153,14 @@ public:
         return _walker.lower_bound();
     }
 
+    /// Returns the uppermost bound of the active clustering ranges
+    ///
+    /// If the filter is in streamed_mutation::forwarding::yes mode then there
+    /// is a single active range which is the one to which the reader was fast-forwarded to.
+    /// Otherwise, there may be multiple clustering ranges (as provided during the reader
+    /// creation) and this function would return the upper bound of the last one.
     position_in_partition_view uppermost_bound() const {
-        return _walker.uppermost_bound();
+        return _fwd ? _fwd_end : _walker.uppermost_bound();
     }
 };
 

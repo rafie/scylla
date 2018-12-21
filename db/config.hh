@@ -279,6 +279,9 @@ public:
             "Total space used for commitlogs. If the used space goes above this value, Scylla rounds up to the next nearest segment multiple and flushes memtables to disk for the oldest commitlog segments, removing those log segments. This reduces the amount of data to replay on startup, and prevents infrequently-updated tables from indefinitely keeping commitlog segments. A small total commitlog space tends to cause more flush activity on less-active tables.\n"  \
             "Related information: Configuring memtable throughput"  \
     )                                                   \
+    val(commitlog_reuse_segments, bool, true, Used,     \
+            "Whether or not to re-use commitlog segments when finished instead of deleting them. Can improve commitlog latency on some file systems.\n"  \
+    )                                                   \
     /* Compaction settings */   \
     /* Related information: Configuring compaction */   \
     val(compaction_preheat_key_cache, bool, true, Unused,                \
@@ -739,7 +742,7 @@ public:
         " Performance is affected to some extent as a result. Useful to help debugging problems that may arise at another layers.") \
     val(cpu_scheduler, bool, true, Used, "Enable cpu scheduling") \
     val(view_building, bool, true, Used, "Enable view building; should only be set to false when the node is experience issues due to view building") \
-    val(enable_sstables_mc_format, bool, false, Used, "Enable SSTables 'mc' format to be used as the default file format; FOR TESTING PURPOSES ONLY - TO BE REMOVED BEFORE RELEASE") \
+    val(enable_sstables_mc_format, bool, true, Used, "Enable SSTables 'mc' format to be used as the default file format") \
     /* done! */
 
 #define _make_value_member(name, type, deflt, status, desc, ...)    \

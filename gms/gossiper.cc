@@ -44,6 +44,7 @@
 #include "gms/gossip_digest_ack2.hh"
 #include "gms/versioned_value.hh"
 #include "gms/gossiper.hh"
+#include "gms/feature_service.hh"
 #include "gms/application_state.hh"
 #include "gms/failure_detector.hh"
 #include "gms/i_failure_detection_event_listener.hh"
@@ -59,6 +60,7 @@
 #include <seastar/util/defer.hh>
 #include <chrono>
 #include "dht/i_partitioner.hh"
+#include "db/config.hh"
 #include <boost/range/algorithm/set_algorithm.hpp>
 #include <boost/range/adaptors.hpp>
 
@@ -126,7 +128,8 @@ public:
     void on_restart(inet_address, endpoint_state) override {}
 };
 
-gossiper::gossiper() {
+gossiper::gossiper(feature_service& features)
+        : _feature_service(features) {
     // Gossiper's stuff below runs only on CPU0
     if (engine().cpu_id() != 0) {
         return;
@@ -644,7 +647,7 @@ void gossiper::run() {
                     if (!_live_endpoints_just_added.empty()) {
                         auto ep = _live_endpoints_just_added.front();
                         _live_endpoints_just_added.pop_front();
-                        logger.info("Favor newly added node {}", ep);
+                        logger.debug("Favor newly added node {}", ep);
                         live_nodes.insert(ep);
                     } else {
                         // Get a random live node
@@ -1193,6 +1196,25 @@ bool gossiper::uses_host_id(inet_address endpoint) {
             get_application_state_ptr(endpoint, application_state::NET_VERSION);
 }
 
+bool gossiper::is_cql_ready(const inet_address& endpoint) const {
+    // Note:
+    // - New scylla node always send application_state::RPC_READY = false when
+    // the node boots and send application_state::RPC_READY = true when cql
+    // server is up
+    // - Old scylla node that does not support the application_state::RPC_READY
+    // never has application_state::RPC_READY in the endpoint_state, we can
+    // only think their cql server is up, so we return true here if
+    // application_state::RPC_READY is not present
+    auto* eps = get_endpoint_state_for_endpoint_ptr(endpoint);
+    if (!eps) {
+        logger.debug("Node {} does not have RPC_READY application_state, return is_cql_ready=true", endpoint);
+        return true;
+    }
+    auto ready = eps->is_cql_ready();
+    logger.debug("Node {}: is_cql_ready={}",  endpoint, ready);
+    return ready;
+}
+
 utils::UUID gossiper::get_host_id(inet_address endpoint) {
     if (!uses_host_id(endpoint)) {
         throw std::runtime_error(format("Host {} does not use new-style tokens!", endpoint));
@@ -1300,6 +1322,14 @@ void gossiper::mark_alive(inet_address addr, endpoint_state& local_state) {
 // Runs inside seastar::async context
 void gossiper::real_mark_alive(inet_address addr, endpoint_state& local_state) {
     logger.trace("marking as alive {}", addr);
+
+    // Do not mark a node with status shutdown as UP.
+    auto status = get_gossip_status(local_state);
+    if (status == sstring(versioned_value::SHUTDOWN)) {
+        logger.warn("Skip marking node {} with status = {} as UP", addr, status);
+        return;
+    }
+
     local_state.mark_alive();
     local_state.update_timestamp(); // prevents do_status_check from racing us and evicting if it was down > A_VERY_LONG_TIME
 
@@ -1321,7 +1351,7 @@ void gossiper::real_mark_alive(inet_address addr, endpoint_state& local_state) {
     }
 
     if (!_in_shadow_round) {
-        logger.info("InetAddress {} is now UP, status = {}", addr, get_gossip_status(local_state));
+        logger.info("InetAddress {} is now UP, status = {}", addr, status);
     }
 
     _subscribers.for_each([addr, local_state] (auto& subscriber) {
@@ -1599,6 +1629,10 @@ future<> gossiper::start_gossiping(int generation_nbr, std::map<application_stat
         return replicate(get_broadcast_address(), local_state).then([] {
             //notify snitches that Gossiper is about to start
             return locator::i_endpoint_snitch::get_local_snitch_ptr()->gossiper_starting();
+        }).then([this] {
+            return async([this] {
+                maybe_enable_features();
+            });
         }).then([this, generation] {
             logger.trace("gossip started with generation {}", generation);
             _enabled = true;
@@ -2153,15 +2187,26 @@ future<> gossiper::wait_for_feature_on_node(std::set<sstring> features, inet_add
     });
 }
 
+feature_service::feature_service() = default;
+
+feature_service::~feature_service() = default;
+
+future<> feature_service::stop() {
+    return make_ready_future<>();
+}
+
+void feature_service::register_feature(feature* f) {
+    _registered_features.emplace(f->name(), std::vector<feature*>()).first->second.emplace_back(f);
+}
+
 void gossiper::register_feature(feature* f) {
+    _feature_service.register_feature(f);
     if (check_features(get_local_gossiper().get_supported_features(), {f->name()})) {
         f->enable();
-    } else {
-        _registered_features.emplace(f->name(), std::vector<feature*>()).first->second.emplace_back(f);
     }
 }
 
-void gossiper::unregister_feature(feature* f) {
+void feature_service::unregister_feature(feature* f) {
     auto&& fsit = _registered_features.find(f->name());
     if (fsit == _registered_features.end()) {
         return;
@@ -2173,58 +2218,53 @@ void gossiper::unregister_feature(feature* f) {
     }
 }
 
+void gossiper::unregister_feature(feature* f) {
+    _feature_service.unregister_feature(f);
+}
+
+
+void feature_service::enable(const sstring& name) {
+    if (auto it = _registered_features.find(name); it != _registered_features.end()) {
+        for (auto&& f : it->second) {
+            f->enable();
+        }
+    }
+}
+
 // Runs inside seastar::async context
 void gossiper::maybe_enable_features() {
-    if (_registered_features.empty()) {
-        _features_condvar.broadcast();
-        return;
-    }
-
     auto&& features = get_supported_features();
     container().invoke_on_all([&features] (gossiper& g) {
-        for (auto it = g._registered_features.begin(); it != g._registered_features.end();) {
-            if (features.find(it->first) != features.end()) {
-                for (auto&& f : it->second) {
-                    f->enable();
-                }
-                it = g._registered_features.erase(it);
-            } else {
-                ++it;
-            }
+        for (auto&& name : features) {
+            g._feature_service.enable(name);
         }
         g._features_condvar.broadcast();
     }).get();
 }
 
-feature::feature(sstring name, bool enabled)
-        : _name(name)
+feature::feature(feature_service& service, sstring name, bool enabled)
+        : _service(&service)
+        , _name(name)
         , _enabled(enabled) {
-    if (!_enabled) {
-        get_local_gossiper().register_feature(this);
-    } else {
+    _service->register_feature(this);
+    if (_enabled) {
         _pr.set_value();
     }
 }
 
 feature::~feature() {
-    if (!_enabled) {
-        auto& gossiper = get_gossiper();
-        if (gossiper.local_is_initialized()) {
-            gossiper.local().unregister_feature(this);
-        }
+    if (_service) {
+        _service->unregister_feature(this);
     }
 }
 
 feature& feature::operator=(feature&& other) {
-    if (!_enabled) {
-        get_local_gossiper().unregister_feature(this);
-    }
+    _service->unregister_feature(this);
+    _service = std::exchange(other._service, nullptr);
     _name = other._name;
     _enabled = other._enabled;
     _pr = std::move(other._pr);
-    if (!_enabled) {
-        get_local_gossiper().register_feature(this);
-    }
+    _service->register_feature(this);
     return *this;
 }
 

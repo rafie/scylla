@@ -29,8 +29,11 @@
 #include "enum_set.hh"
 #include "range.hh"
 #include "tracing/tracing.hh"
+#include "utils/small_vector.hh"
 
 namespace query {
+
+using column_id_vector = utils::small_vector<column_id, 8>;
 
 template <typename T>
 using range = wrapping_range<T>;
@@ -100,7 +103,7 @@ constexpr auto max_rows = std::numeric_limits<uint32_t>::max();
 class partition_slice {
 public:
     enum class option { send_clustering_key, send_partition_key, send_timestamp, send_expiry, reversed, distinct, collections_as_maps, send_ttl,
-                        allow_short_read, with_digest };
+                        allow_short_read, with_digest, bypass_cache };
     using option_set = enum_set<super_enum<option,
         option::send_clustering_key,
         option::send_partition_key,
@@ -111,19 +114,20 @@ public:
         option::collections_as_maps,
         option::send_ttl,
         option::allow_short_read,
-        option::with_digest>>;
+        option::with_digest,
+        option::bypass_cache>>;
     clustering_row_ranges _row_ranges;
 public:
-    std::vector<column_id> static_columns; // TODO: consider using bitmap
-    std::vector<column_id> regular_columns;  // TODO: consider using bitmap
+    column_id_vector static_columns; // TODO: consider using bitmap
+    column_id_vector regular_columns;  // TODO: consider using bitmap
     option_set options;
 private:
     std::unique_ptr<specific_ranges> _specific_ranges;
     cql_serialization_format _cql_format;
     uint32_t _partition_row_limit;
 public:
-    partition_slice(clustering_row_ranges row_ranges, std::vector<column_id> static_columns,
-        std::vector<column_id> regular_columns, option_set options,
+    partition_slice(clustering_row_ranges row_ranges, column_id_vector static_columns,
+        column_id_vector regular_columns, option_set options,
         std::unique_ptr<specific_ranges> specific_ranges = nullptr,
         cql_serialization_format = cql_serialization_format::internal(),
         uint32_t partition_row_limit = max_rows);
@@ -136,6 +140,9 @@ public:
     const clustering_row_ranges& row_ranges(const schema&, const partition_key&) const;
     void set_range(const schema&, const partition_key&, clustering_row_ranges);
     void clear_range(const schema&, const partition_key&);
+    void clear_ranges() {
+        _specific_ranges = nullptr;
+    }
     // FIXME: possibly make this function return a const ref instead.
     clustering_row_ranges get_all_ranges() const;
 

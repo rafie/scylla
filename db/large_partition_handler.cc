@@ -19,7 +19,7 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "core/print.hh"
+#include <seastar/core/print.hh>
 #include "db/query_context.hh"
 #include "db/system_keyspace.hh"
 #include "db/large_partition_handler.hh"
@@ -69,7 +69,7 @@ future<> cql_table_large_partition_handler::update_large_partitions(const schema
     .then_wrapped([ks_name, cf_name, key_str, partition_size](auto&& f) {
         try {
             f.get();
-            large_partition_logger.warn("Writing large row {}/{}:{} ({} bytes)", ks_name, cf_name, key_str, partition_size);
+            large_partition_logger.warn("Writing large partition {}/{}:{} ({} bytes)", ks_name, cf_name, key_str, partition_size);
         } catch (...) {
             large_partition_logger.warn("Failed to update {}: {}", db::system_keyspace::LARGE_PARTITIONS, std::current_exception());
         }

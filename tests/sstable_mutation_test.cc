@@ -25,8 +25,8 @@
 #include "tests/test-utils.hh"
 #include "sstable_test.hh"
 #include "sstables/key.hh"
-#include "core/do_with.hh"
-#include "core/thread.hh"
+#include <seastar/core/do_with.hh>
+#include <seastar/core/thread.hh>
 #include "sstables/sstables.hh"
 #include "database.hh"
 #include "timestamp.hh"
@@ -1326,20 +1326,6 @@ SEASTAR_TEST_CASE(test_no_index_reads_when_rows_fall_into_range_boundaries) {
             auto before = index_accesses();
 
             {
-                auto slice = partition_slice_builder(*s).with_ranges({
-                    ss.make_ckey_range(0, 3),
-                    ss.make_ckey_range(5, 8)
-                }).build();
-
-                assert_that(ms.make_reader(s, query::full_partition_range, slice))
-                    .produces(m1)
-                    .produces(m2)
-                    .produces_end_of_stream();
-
-                BOOST_REQUIRE_EQUAL(index_accesses(), before);
-            }
-
-            {
                 assert_that(ms.make_reader(s))
                     .produces(m1)
                     .produces(m2)
@@ -1433,4 +1419,58 @@ SEASTAR_THREAD_TEST_CASE(test_large_index_pages_do_not_cause_large_allocations) 
 
     assert_that(actual).is_equal_to(expected);
     BOOST_REQUIRE_EQUAL(large_allocs_after - large_allocs_before, 0);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_schema_changes) {
+    auto dir = make_lw_shared<tmpdir>();
+    storage_service_for_tests ssft;
+    auto wait_bg = seastar::defer([] { sstables::await_background_jobs().get(); });
+    int gen = 1;
+
+    std::map<std::tuple<sstables::sstable::version_types, schema_ptr>, std::tuple<shared_sstable, int>> cache;
+    for_each_schema_change([&] (schema_ptr base, const std::vector<mutation>& base_mutations,
+                                schema_ptr changed, const std::vector<mutation>& changed_mutations) {
+        for (auto version : all_sstable_versions) {
+            auto it = cache.find(std::tuple { version, base });
+
+            shared_sstable created_with_base_schema;
+            shared_sstable created_with_changed_schema;
+            if (it == cache.end()) {
+                auto mt = make_lw_shared<memtable>(base);
+                for (auto& m : base_mutations) {
+                    mt->apply(m);
+                }
+                created_with_base_schema = sstables::make_sstable(base, dir->path, gen, version, sstables::sstable::format_types::big);
+                sstable_writer_config cfg;
+                cfg.large_partition_handler = &nop_lp_handler;
+                created_with_base_schema->write_components(mt->make_flat_reader(base), base_mutations.size(), base, cfg).get();
+                created_with_base_schema->load().get();
+
+                created_with_changed_schema = sstables::make_sstable(changed, dir->path, gen, version, sstables::sstable::format_types::big);
+                created_with_changed_schema->load().get();
+
+                cache.emplace(std::tuple { version, base }, std::tuple { created_with_base_schema, gen });
+                gen++;
+            } else {
+                created_with_base_schema = std::get<shared_sstable>(it->second);
+
+                created_with_changed_schema = sstables::make_sstable(changed, dir->path, std::get<int>(it->second), version, sstables::sstable::format_types::big);
+                created_with_changed_schema->load().get();
+            }
+
+            auto mr = assert_that(created_with_base_schema->as_mutation_source()
+                        .make_reader(changed, dht::partition_range::make_open_ended_both_sides(), changed->full_slice()));
+            for (auto& m : changed_mutations) {
+                mr.produces(m);
+            }
+            mr.produces_end_of_stream();
+
+            mr = assert_that(created_with_changed_schema->as_mutation_source()
+                    .make_reader(changed, dht::partition_range::make_open_ended_both_sides(), changed->full_slice()));
+            for (auto& m : changed_mutations) {
+                mr.produces(m);
+            }
+            mr.produces_end_of_stream();
+        }
+    });
 }

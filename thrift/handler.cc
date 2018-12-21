@@ -25,10 +25,10 @@
 #include <sys/param.h>
 // end thrift workaround
 #include "Cassandra.h"
-#include "core/distributed.hh"
+#include <seastar/core/distributed.hh>
 #include "database.hh"
-#include "core/sstring.hh"
-#include "core/print.hh"
+#include <seastar/core/sstring.hh>
+#include <seastar/core/print.hh>
 #include "frozen_mutation.hh"
 #include "utils/UUID_gen.hh"
 #include <thrift/protocol/TBinaryProtocol.h>
@@ -53,6 +53,7 @@
 #include <boost/range/adaptor/indirected.hpp>
 #include "query-result-reader.hh"
 #include "thrift/server.hh"
+#include "db/config.hh"
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -358,7 +359,7 @@ public:
     static lw_shared_ptr<query::read_command> make_paged_read_cmd(const schema& s, uint32_t column_limit, const std::string* start_column, const dht::partition_range_vector& range) {
         auto opts = query_opts(s);
         std::vector<query::clustering_range> clustering_ranges;
-        std::vector<column_id> regular_columns;
+        query::column_id_vector regular_columns;
         uint32_t row_limit;
         uint32_t partition_limit;
         std::unique_ptr<query::specific_ranges> specific_ranges = nullptr;
@@ -620,7 +621,7 @@ public:
             auto& s = *schema;
             auto pk = key_from_thrift(s, to_bytes(request.key));
             auto dk = dht::global_partitioner().decorate_key(s, pk);
-            std::vector<column_id> regular_columns;
+            query::column_id_vector regular_columns;
             std::vector<query::clustering_range> clustering_ranges;
             auto opts = query_opts(s);
             uint32_t row_limit;
@@ -1122,7 +1123,7 @@ private:
                 if (cell) {
                     c.__set_value(bytes_to_string(*cell));
                 }
-                
+
             }
             void end_row() {
                 CqlRow& r = _rows.emplace_back();
@@ -1432,12 +1433,12 @@ private:
     // Adds the column_ids from the specified range of column_definitions to the out vector,
     // according to the order defined by reversed.
     template <typename Iterator>
-    static std::vector<column_id> add_columns(Iterator beg, Iterator end, bool reversed) {
+    static query::column_id_vector add_columns(Iterator beg, Iterator end, bool reversed) {
         auto range = boost::make_iterator_range(std::move(beg), std::move(end))
                      | boost::adaptors::filtered(std::mem_fn(&column_definition::is_atomic))
                      | boost::adaptors::transformed(std::mem_fn(&column_definition::id));
-        return reversed ? boost::copy_range<std::vector<column_id>>(range | boost::adaptors::reversed)
-                        : boost::copy_range<std::vector<column_id>>(range);
+        return reversed ? boost::copy_range<query::column_id_vector>(range | boost::adaptors::reversed)
+                        : boost::copy_range<query::column_id_vector>(range);
     }
     static query::partition_slice::option_set query_opts(const schema& s) {
         query::partition_slice::option_set opts;
@@ -1454,7 +1455,7 @@ private:
     static lw_shared_ptr<query::read_command> slice_pred_to_read_cmd(const schema& s, const SlicePredicate& predicate) {
         auto opts = query_opts(s);
         std::vector<query::clustering_range> clustering_ranges;
-        std::vector<column_id> regular_columns;
+        query::column_id_vector regular_columns;
         uint32_t per_partition_row_limit = query::max_rows;
         if (predicate.__isset.column_names) {
             thrift_validation::validate_column_names(predicate.column_names);

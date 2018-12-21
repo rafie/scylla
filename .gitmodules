@@ -1,6 +1,6 @@
 [submodule "seastar"]
 	path = seastar
-	url = ../seastar
+	url = ../scylla-seastar
 	ignore = dirty
 [submodule "swagger-ui"]
 	path = swagger-ui
@@ -9,3 +9,6 @@
 [submodule "xxHash"]
 	path = xxHash
 	url = ../xxHash
+[submodule "libdeflate"]
+	path = libdeflate
+	url = ../libdeflate

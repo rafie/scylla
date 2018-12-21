@@ -25,17 +25,17 @@
 #include "dht/i_partitioner.hh"
 #include "locator/abstract_replication_strategy.hh"
 #include "index/secondary_index_manager.hh"
-#include "core/sstring.hh"
-#include "core/shared_ptr.hh"
+#include <seastar/core/sstring.hh>
+#include <seastar/core/shared_ptr.hh>
 #include <seastar/core/execution_stage.hh>
-#include "net/byteorder.hh"
+#include <seastar/net/byteorder.hh>
 #include "utils/UUID_gen.hh"
 #include "utils/UUID.hh"
 #include "utils/hash.hh"
 #include "db_clock.hh"
 #include "gc_clock.hh"
 #include <chrono>
-#include "core/distributed.hh"
+#include <seastar/core/distributed.hh>
 #include <functional>
 #include <cstdint>
 #include <unordered_map>
@@ -48,8 +48,8 @@
 #include <string.h>
 #include "types.hh"
 #include "compound.hh"
-#include "core/future.hh"
-#include "core/gate.hh"
+#include <seastar/core/future.hh>
+#include <seastar/core/gate.hh>
 #include "cql3/column_specification.hh"
 #include "db/commitlog/replay_position.hh"
 #include <limits>
@@ -77,6 +77,7 @@
 #include <seastar/core/metrics_registration.hh>
 #include "tracing/trace_state.hh"
 #include "db/view/view.hh"
+#include "db/view/view_update_backlog.hh"
 #include "db/view/row_locking.hh"
 #include "lister.hh"
 #include "utils/phased_barrier.hh"
@@ -87,6 +88,7 @@
 #include "querier.hh"
 #include "mutation_query.hh"
 #include "db/large_partition_handler.hh"
+#include "cache_temperature.hh"
 #include <unordered_set>
 
 class cell_locker;
@@ -282,24 +284,15 @@ struct cf_stats {
     int64_t clustering_filter_fast_path_count = 0;
     // how many sstables survived the clustering key checks
     int64_t surviving_sstables_after_clustering_filter = 0;
-};
 
-class cache_temperature {
-    float hit_rate;
-    explicit cache_temperature(uint8_t hr) : hit_rate(hr/255.0f) {}
-public:
-    uint8_t get_serialized_temperature() const {
-        return hit_rate * 255;
-    }
-    cache_temperature() : hit_rate(0) {}
-    explicit cache_temperature(float hr) : hit_rate(hr) {}
-    explicit operator float() const { return hit_rate; }
-    static cache_temperature invalid() { return cache_temperature(-1.0f); }
-    friend struct ser::serializer<cache_temperature>;
+    // How many view updates were dropped due to overload.
+    int64_t dropped_view_updates = 0;
 };
 
 class table;
 using column_family = table;
+
+class database_sstable_write_monitor;
 
 class table : public enable_lw_shared_from_this<table> {
 public:
@@ -329,6 +322,7 @@ public:
 #ifndef FEATURE_10
         db::data_listeners* data_listeners = nullptr;
 #endif // FEATURE_10
+        size_t view_update_concurrency_semaphore_limit;
     };
     struct no_commitlog {};
     struct stats {
@@ -401,7 +395,7 @@ private:
     // plan memtables and the resulting sstables are not made visible until
     // the streaming is complete.
     struct monitored_sstable {
-        std::unique_ptr<sstables::write_monitor> monitor;
+        std::unique_ptr<database_sstable_write_monitor> monitor;
         sstables::shared_sstable sstable;
     };
 
@@ -906,8 +900,7 @@ private:
     future<> generate_and_propagate_view_updates(const schema_ptr& base,
             std::vector<view_ptr>&& views,
             mutation&& m,
-            flat_mutation_reader_opt existings,
-            db::timeout_clock::time_point timeout) const;
+            flat_mutation_reader_opt existings) const;
 
     mutable row_locker _row_locker;
     future<row_locker::lock_holder> local_base_lock(
@@ -949,7 +942,7 @@ private:
     future<> seal_active_streaming_memtable_immediate(flush_permit&&);
 
     // filter manifest.json files out
-    static bool manifest_json_filter(const lister::path&, const directory_entry& entry);
+    static bool manifest_json_filter(const fs::path&, const directory_entry& entry);
 
     // Iterate over all partitions.  Protocol is the same as std::all_of(),
     // so that iteration can be stopped by returning false.
@@ -1101,6 +1094,7 @@ public:
         seastar::scheduling_group streaming_scheduling_group;
         bool enable_metrics_reporting = false;
         db::timeout_semaphore* view_update_concurrency_semaphore = nullptr;
+        size_t view_update_concurrency_semaphore_limit;
     };
 private:
     std::unique_ptr<locator::abstract_replication_strategy> _replication_strategy;
@@ -1205,6 +1199,7 @@ private:
     static const size_t max_count_system_concurrent_reads{10};
     size_t max_memory_system_concurrent_reads() { return _dbcfg.available_memory * 0.02; };
     static constexpr size_t max_concurrent_sstable_loads() { return 3; }
+    size_t max_memory_pending_view_updates() const { return _dbcfg.available_memory * 0.1; }
 
     struct db_stats {
         uint64_t total_writes = 0;
@@ -1241,7 +1236,7 @@ private:
 
     semaphore _sstable_load_concurrency_sem{max_concurrent_sstable_loads()};
 
-    db::timeout_semaphore _view_update_concurrency_sem{100}; // Stand-in hack for #2538
+    db::timeout_semaphore _view_update_concurrency_sem{max_memory_pending_view_updates()};
 
     cache_tracker _row_cache_tracker;
 
@@ -1462,6 +1457,12 @@ public:
     std::unordered_set<sstring> get_initial_tokens();
     std::experimental::optional<gms::inet_address> get_replace_address();
     bool is_replacing();
+    reader_concurrency_semaphore& user_read_concurrency_sem() {
+        return _read_concurrency_sem;
+    }
+    reader_concurrency_semaphore& streaming_read_concurrency_sem() {
+        return _streaming_concurrency_sem;
+    }
     reader_concurrency_semaphore& system_keyspace_read_concurrency_sem() {
         return _system_read_concurrency_sem;
     }
@@ -1486,6 +1487,10 @@ public:
         return _querier_cache;
     }
 
+    db::view::update_backlog get_view_update_backlog() const {
+        return {max_memory_pending_view_updates() - _view_update_concurrency_sem.current(), max_memory_pending_view_updates()};
+    }
+
     friend class distributed_loader;
 
 #ifndef FEATURE_10
@@ -1503,6 +1508,8 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
         std::function<std::optional<dht::partition_range>()> range_generator);
 
 future<> update_schema_version_and_announce(distributed<service::storage_proxy>& proxy);
+
+bool is_internal_keyspace(const sstring& name);
 
 class distributed_loader {
 public:

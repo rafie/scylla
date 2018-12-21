@@ -39,7 +39,7 @@
 
 #include "storage_service.hh"
 #include "dht/boot_strapper.hh"
-#include "core/distributed.hh"
+#include <seastar/core/distributed.hh>
 #include "locator/snitch_base.hh"
 #include "db/system_keyspace.hh"
 #include "utils/UUID.hh"
@@ -74,6 +74,8 @@
 #include "supervisor.hh"
 #include "sstables/compaction_manager.hh"
 #include "sstables/sstables.hh"
+#include "db/config.hh"
+#include "auth/common.hh"
 #include <seastar/core/metrics.hh>
 
 using token = dht::token;
@@ -124,9 +126,26 @@ int get_generation_number() {
     return generation_number;
 }
 
-storage_service::storage_service(distributed<database>& db, sharded<auth::service>& auth_service, sharded<db::system_distributed_keyspace>& sys_dist_ks)
-        : _db(db)
+storage_service::storage_service(distributed<database>& db, sharded<auth::service>& auth_service, sharded<db::system_distributed_keyspace>& sys_dist_ks,
+        gms::feature_service& feature_service)
+        : _feature_service(feature_service)
+        , _db(db)
         , _auth_service(auth_service)
+        , _range_tombstones_feature(_feature_service, RANGE_TOMBSTONES_FEATURE)
+        , _large_partitions_feature(_feature_service, LARGE_PARTITIONS_FEATURE)
+        , _materialized_views_feature(_feature_service, MATERIALIZED_VIEWS_FEATURE)
+        , _counters_feature(_feature_service, COUNTERS_FEATURE)
+        , _indexes_feature(_feature_service, INDEXES_FEATURE)
+        , _digest_multipartition_read_feature(_feature_service, DIGEST_MULTIPARTITION_READ_FEATURE)
+        , _correct_counter_order_feature(_feature_service, CORRECT_COUNTER_ORDER_FEATURE)
+        , _schema_tables_v3(_feature_service, SCHEMA_TABLES_V3)
+        , _correct_non_compound_range_tombstones(_feature_service, CORRECT_NON_COMPOUND_RANGE_TOMBSTONES)
+        , _write_failure_reply_feature(_feature_service, WRITE_FAILURE_REPLY_FEATURE)
+        , _xxhash_feature(_feature_service, XXHASH_FEATURE)
+        , _roles_feature(_feature_service, ROLES_FEATURE)
+        , _la_sstable_feature(_feature_service, LA_SSTABLE_FEATURE)
+        , _stream_with_rpc_stream_feature(_feature_service, STREAM_WITH_RPC_STREAM)
+        , _mc_sstable_feature(_feature_service, MC_SSTABLE_FEATURE)
         , _replicate_action([this] { return do_replicate_to_all_cores(); })
         , _update_pending_ranges_action([this] { return do_update_pending_ranges(); })
         , _sys_dist_ks(sys_dist_ks) {
@@ -135,6 +154,24 @@ storage_service::storage_service(distributed<database>& db, sharded<auth::servic
     sstable_write_error.connect([this] { isolate_on_error(); });
     general_disk_error.connect([this] { isolate_on_error(); });
     commit_error.connect([this] { isolate_on_commit_error(); });
+}
+
+void storage_service::enable_all_features() {
+    _range_tombstones_feature.enable();
+    _large_partitions_feature.enable();
+    _materialized_views_feature.enable();
+    _counters_feature.enable();
+    _indexes_feature.enable();
+    _digest_multipartition_read_feature.enable();
+    _correct_counter_order_feature.enable();
+    _schema_tables_v3.enable();
+    _correct_non_compound_range_tombstones.enable();
+    _write_failure_reply_feature.enable();
+    _xxhash_feature.enable();
+    _roles_feature.enable();
+    _la_sstable_feature.enable();
+    _stream_with_rpc_stream_feature.enable();
+    _mc_sstable_feature.enable();
 }
 
 enum class node_external_status {
@@ -393,6 +430,8 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
     app_states.emplace(gms::application_state::SUPPORTED_FEATURES, value_factory.supported_features(features));
     app_states.emplace(gms::application_state::CACHE_HITRATES, value_factory.cache_hitrates(""));
     app_states.emplace(gms::application_state::SCHEMA_TABLES_VERSION, versioned_value(db::schema_tables::version));
+    app_states.emplace(gms::application_state::RPC_READY, value_factory.cql_ready(false));
+    app_states.emplace(gms::application_state::VIEW_BACKLOG, versioned_value(""));
     slogger.info("Starting up server gossip");
 
     auto& gossiper = gms::get_local_gossiper();
@@ -406,9 +445,6 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
     auto& proxy = service::get_storage_proxy();
     // gossip Schema.emptyVersion forcing immediate check for schema updates (see MigrationManager#maybeScheduleSchemaPull)
     update_schema_version_and_announce(proxy).get();// Ensure we know our own actual Schema UUID in preparation for updates
-    get_storage_service().invoke_on_all([] (auto& ss) {
-        ss.register_features();
-    }).get();
 #if 0
     if (!MessagingService.instance().isListening())
         MessagingService.instance().listen(FBUtilities.getLocalAddress());
@@ -419,22 +455,26 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
 #endif
 }
 
-void storage_service::register_features() {
-    _range_tombstones_feature = gms::feature(RANGE_TOMBSTONES_FEATURE);
-    _large_partitions_feature = gms::feature(LARGE_PARTITIONS_FEATURE);
-    _counters_feature = gms::feature(COUNTERS_FEATURE);
-    _digest_multipartition_read_feature = gms::feature(DIGEST_MULTIPARTITION_READ_FEATURE);
-    _correct_counter_order_feature = gms::feature(CORRECT_COUNTER_ORDER_FEATURE);
-    _schema_tables_v3 = gms::feature(SCHEMA_TABLES_V3);
-    _correct_non_compound_range_tombstones = gms::feature(CORRECT_NON_COMPOUND_RANGE_TOMBSTONES);
-    _write_failure_reply_feature = gms::feature(WRITE_FAILURE_REPLY_FEATURE);
-    _xxhash_feature = gms::feature(XXHASH_FEATURE);
-    _roles_feature = gms::feature(ROLES_FEATURE);
-    _la_sstable_feature = gms::feature(LA_SSTABLE_FEATURE);
-    _stream_with_rpc_stream_feature = gms::feature(STREAM_WITH_RPC_STREAM);
-    _mc_sstable_feature = gms::feature(MC_SSTABLE_FEATURE);
-    _materialized_views_feature = gms::feature(MATERIALIZED_VIEWS_FEATURE);
-    _indexes_feature = gms::feature(INDEXES_FEATURE);
+static auth::permissions_cache_config permissions_cache_config_from_db_config(const db::config& dc) {
+    auth::permissions_cache_config c;
+    c.max_entries = dc.permissions_cache_max_entries();
+    c.validity_period = std::chrono::milliseconds(dc.permissions_validity_in_ms());
+    c.update_period = std::chrono::milliseconds(dc.permissions_update_interval_in_ms());
+
+    return c;
+}
+
+static auth::service_config auth_service_config_from_db_config(const db::config& dc) {
+    const qualified_name qualified_authorizer_name(auth::meta::AUTH_PACKAGE_NAME, dc.authorizer());
+    const qualified_name qualified_authenticator_name(auth::meta::AUTH_PACKAGE_NAME, dc.authenticator());
+    const qualified_name qualified_role_manager_name(auth::meta::AUTH_PACKAGE_NAME, dc.role_manager());
+
+    auth::service_config c;
+    c.authorizer_java_name = qualified_authorizer_name;
+    c.authenticator_java_name = qualified_authenticator_name;
+    c.role_manager_java_name = qualified_role_manager_name;
+
+    return c;
 }
 
 // Runs inside seastar::async context
@@ -614,10 +654,10 @@ void storage_service::join_token_ring(int delay) {
         }
 
         _auth_service.start(
-                auth::permissions_cache_config::from_db_config(_db.local().get_config()),
+                permissions_cache_config_from_db_config(_db.local().get_config()),
                 std::ref(cql3::get_query_processor()),
                 std::ref(service::get_migration_manager()),
-                auth::service_config::from_db_config(_db.local().get_config())).get();
+                auth_service_config_from_db_config(_db.local().get_config())).get();
 
         _auth_service.invoke_on_all(&auth::service::start).get();
 
@@ -647,10 +687,10 @@ future<> storage_service::join_ring() {
                 }
 
                 ss._auth_service.start(
-                        auth::permissions_cache_config::from_db_config(ss._db.local().get_config()),
+                        permissions_cache_config_from_db_config(ss._db.local().get_config()),
                         std::ref(cql3::get_query_processor()),
                         std::ref(service::get_migration_manager()),
-                        auth::service_config::from_db_config(ss._db.local().get_config())).get();
+                        auth_service_config_from_db_config(ss._db.local().get_config())).get();
 
                ss._auth_service.invoke_on_all(&auth::service::start).get();
             }
@@ -877,6 +917,7 @@ void storage_service::handle_state_normal(inet_address endpoint) {
         }
     }
 
+    bool is_member = _token_metadata.is_member(endpoint);
     // Update pending ranges after update of normal tokens immediately to avoid
     // a race where natural endpoint was updated to contain node A, but A was
     // not yet removed from pending endpoints
@@ -905,15 +946,10 @@ void storage_service::handle_state_normal(inet_address endpoint) {
         db::system_keyspace::update_local_tokens(std::unordered_set<dht::token>(), local_tokens_to_remove).discard_result().get();
     }
 
-    get_storage_service().invoke_on_all([endpoint] (auto&& ss) {
-        for (auto&& subscriber : ss._lifecycle_subscribers) {
-            try {
-                subscriber->on_join_cluster(endpoint);
-            } catch (...) {
-                slogger.warn("Join cluster notification failed {}: {}", endpoint, std::current_exception());
-            }
-        }
-    }).get();
+    // Send joined notification only when this node was not a member prior to this
+    if (!is_member) {
+        notify_joined(endpoint);
+    }
 
     update_pending_ranges().get();
     if (slogger.is_enabled(logging::log_level::debug)) {
@@ -1063,15 +1099,7 @@ void storage_service::on_alive(gms::inet_address endpoint, gms::endpoint_state s
 #if 0
         HintedHandOffManager.instance.scheduleHintDelivery(endpoint, true);
 #endif
-        get_storage_service().invoke_on_all([endpoint] (auto&& ss) {
-            for (auto&& subscriber : ss._lifecycle_subscribers) {
-                try {
-                    subscriber->on_up(endpoint);
-                } catch (...) {
-                    slogger.warn("Up notification failed {}: {}", endpoint, std::current_exception());
-                }
-            }
-        }).get();
+        notify_up(endpoint);
     }
 }
 
@@ -1121,6 +1149,9 @@ void storage_service::on_change(inet_address endpoint, application_state state, 
                 get_local_migration_manager().schedule_schema_pull(endpoint, *ep_state).handle_exception([endpoint] (auto ep) {
                     slogger.warn("Failed to pull schema from {}: {}", endpoint, ep);
                 });
+            } else if (state == application_state::RPC_READY) {
+                slogger.debug("Got application_state::RPC_READY for node {}, is_cql_ready={}", endpoint, ep_state->is_cql_ready());
+                notify_cql_change(endpoint, ep_state->is_cql_ready());
             }
         }
     }
@@ -1135,16 +1166,7 @@ void storage_service::on_remove(gms::inet_address endpoint) {
 
 void storage_service::on_dead(gms::inet_address endpoint, gms::endpoint_state state) {
     slogger.debug("endpoint={} on_dead", endpoint);
-    get_storage_service().invoke_on_all([endpoint] (auto&& ss) {
-        netw::get_local_messaging_service().remove_rpc_client(netw::msg_addr{endpoint, 0});
-        for (auto&& subscriber : ss._lifecycle_subscribers) {
-            try {
-                subscriber->on_down(endpoint);
-            } catch (...) {
-                slogger.warn("Down notification failed {}: {}", endpoint, std::current_exception());
-            }
-        }
-    }).get();
+    notify_down(endpoint);
 }
 
 void storage_service::on_restart(gms::inet_address endpoint, gms::endpoint_state state) {
@@ -2156,6 +2178,8 @@ future<> storage_service::start_native_transport() {
 
                 });
             });
+        }).then([&ss] {
+            return ss.set_cql_ready(true);
         });
     });
 }
@@ -2166,8 +2190,10 @@ future<> storage_service::do_stop_native_transport() {
     if (cserver) {
         // FIXME: cql_server::stop() doesn't kill existing connections and wait for them
         // Note: We must capture cserver so that it will not be freed before cserver->stop
-        return cserver->stop().then([cserver] {
-            slogger.info("CQL server stopped");
+        return set_cql_ready(false).then([cserver] {
+            return cserver->stop().then([cserver] {
+                slogger.info("CQL server stopped");
+            });
         });
     }
     return make_ready_future<>();
@@ -2404,20 +2430,17 @@ future<> storage_service::drain() {
     StorageProxy.instance.verifyNoHintsInProgress();
 #endif
 
+            // Interrupt on going compaction and shutdown to prevent further compaction
+            ss.db().invoke_on_all([] (auto& db) {
+                return db.get_compaction_manager().stop();
+            }).get();
+
             ss.set_mode(mode::DRAINING, "flushing column families", false);
             ss.flush_column_families();
 
             db::get_batchlog_manager().invoke_on_all([] (auto& bm) {
                 return bm.stop();
             }).get();
-
-            // Interrupt on going compaction and shutdown to prevent further compaction
-            ss.db().invoke_on_all([] (auto& db) {
-                // FIXME: ongoing compaction tasks should be interrupted, not
-                // waited for which is what compaction_manager::stop() does now.
-                return db.get_compaction_manager().stop();
-            }).get();
-
 #if 0
     // whilst we've flushed all the CFs, which will have recycled all completed segments, we want to ensure
     // there are no segments to replay, so we force the recycling of any remaining (should be at most one)
@@ -2652,16 +2675,7 @@ void storage_service::excise(std::unordered_set<token> tokens, inet_address endp
     _token_metadata.remove_endpoint(endpoint);
     _token_metadata.remove_bootstrap_tokens(tokens);
 
-    get_storage_service().invoke_on_all([endpoint] (auto&& ss) {
-        for (auto&& subscriber : ss._lifecycle_subscribers) {
-            try {
-                subscriber->on_leave_cluster(endpoint);
-            } catch (...) {
-                slogger.warn("Leave cluster notification failed {}: {}", endpoint, std::current_exception());
-            }
-        }
-    }).get();
-    slogger.info("Node {} has left the cluster", endpoint);
+    notify_left(endpoint);
 
     update_pending_ranges().get();
 }
@@ -3252,6 +3266,91 @@ storage_service::view_build_statuses(sstring keyspace, sstring view_name) const 
                     return std::pair(p.first.to_sstring(), std::move(s));
                 }));
     });
+}
+
+future<> init_storage_service(distributed<database>& db, sharded<auth::service>& auth_service, sharded<db::system_distributed_keyspace>& sys_dist_ks,
+        sharded<gms::feature_service>& feature_service) {
+    return service::get_storage_service().start(std::ref(db), std::ref(auth_service), std::ref(sys_dist_ks), std::ref(feature_service));
+}
+
+future<> deinit_storage_service() {
+    return service::get_storage_service().stop();
+}
+
+future<> storage_service::set_cql_ready(bool ready) {
+    return gms::get_local_gossiper().add_local_application_state(application_state::RPC_READY, value_factory.cql_ready(ready));
+}
+
+void storage_service::notify_down(inet_address endpoint) {
+    get_storage_service().invoke_on_all([endpoint] (auto&& ss) {
+        netw::get_local_messaging_service().remove_rpc_client(netw::msg_addr{endpoint, 0});
+        for (auto&& subscriber : ss._lifecycle_subscribers) {
+            try {
+                subscriber->on_down(endpoint);
+            } catch (...) {
+                slogger.warn("Down notification failed {}: {}", endpoint, std::current_exception());
+            }
+        }
+    }).get();
+    slogger.debug("Notify node {} has been down", endpoint);
+}
+
+void storage_service::notify_left(inet_address endpoint) {
+    get_storage_service().invoke_on_all([endpoint] (auto&& ss) {
+        for (auto&& subscriber : ss._lifecycle_subscribers) {
+            try {
+                subscriber->on_leave_cluster(endpoint);
+            } catch (...) {
+                slogger.warn("Leave cluster notification failed {}: {}", endpoint, std::current_exception());
+            }
+        }
+    }).get();
+    slogger.debug("Notify node {} has left the cluster", endpoint);
+}
+
+void storage_service::notify_up(inet_address endpoint)
+{
+    auto& gossiper = gms::get_local_gossiper();
+    if (!gossiper.is_cql_ready(endpoint) || !gossiper.is_alive(endpoint)) {
+        return;
+    }
+    get_storage_service().invoke_on_all([endpoint] (auto&& ss) {
+        for (auto&& subscriber : ss._lifecycle_subscribers) {
+            try {
+                subscriber->on_up(endpoint);
+            } catch (...) {
+                slogger.warn("Up notification failed {}: {}", endpoint, std::current_exception());
+            }
+        }
+    }).get();
+    slogger.debug("Notify node {} has been up", endpoint);
+}
+
+void storage_service::notify_joined(inet_address endpoint)
+{
+    if (!gms::get_local_gossiper().is_normal(endpoint)) {
+        return;
+    }
+
+    get_storage_service().invoke_on_all([endpoint] (auto&& ss) {
+        for (auto&& subscriber : ss._lifecycle_subscribers) {
+            try {
+                subscriber->on_join_cluster(endpoint);
+            } catch (...) {
+                slogger.warn("Join cluster notification failed {}: {}", endpoint, std::current_exception());
+            }
+        }
+    }).get();
+    slogger.debug("Notify node {} has joined the cluster", endpoint);
+}
+
+void storage_service::notify_cql_change(inet_address endpoint, bool ready)
+{
+    if (ready) {
+        notify_up(endpoint);
+    } else {
+        notify_down(endpoint);
+    }
 }
 
 } // namespace service

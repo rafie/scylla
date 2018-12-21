@@ -21,8 +21,9 @@
 
 #pragma once
 
+#include <seastar/util/gcc6-concepts.hh>
 #include "disk_types.hh"
-#include "core/enum.hh"
+#include <seastar/core/enum.hh>
 #include "bytes.hh"
 #include "gc_clock.hh"
 #include "tombstone.hh"
@@ -37,6 +38,7 @@
 #include <type_traits>
 #include "version.hh"
 #include "encoding_stats.hh"
+#include "utils/UUID.hh"
 
 // While the sstable code works with char, bytes_view works with int8_t
 // (signed char). Rather than change all the code, let's do a cast.
@@ -46,6 +48,15 @@ static inline bytes_view to_bytes_view(const temporary_buffer<char>& b) {
 }
 
 namespace sstables {
+
+GCC6_CONCEPT(
+template<typename T>
+concept bool Writer() {
+    return requires(T& wr, const char* data, size_t size) {
+        { wr.write(data, size) } -> void
+    };
+}
+)
 
 struct commitlog_interval {
     db::replay_position start;
@@ -237,9 +248,10 @@ struct metadata {
 template <typename T>
 uint64_t serialized_size(sstable_version_types v, const T& object);
 
-template <class T>
+template <class T, typename W>
+GCC6_CONCEPT(requires Writer<W>())
 typename std::enable_if_t<!std::is_integral<T>::value && !std::is_enum<T>::value, void>
-write(sstable_version_types v, file_writer& out, const T& t);
+write(sstable_version_types v, W& out, const T& t);
 
 // serialized_size() implementation for metadata class
 template <typename Component>
@@ -262,7 +274,7 @@ struct validation_metadata : public metadata_base<validation_metadata> {
 };
 
 struct compaction_metadata : public metadata_base<compaction_metadata> {
-    disk_array<uint32_t, uint32_t> ancestors;
+    disk_array<uint32_t, uint32_t> ancestors; // DEPRECATED, not available in sstable format mc.
     disk_array<uint32_t, uint8_t> cardinality;
 
     template <typename Describer>
@@ -460,6 +472,10 @@ struct sstable_enabled_features {
 
     template <typename Describer>
     auto describe_type(sstable_version_types v, Describer f) { return f(enabled_features); }
+
+    static sstable_enabled_features all() {
+        return sstable_enabled_features{(1 << sstable_feature::End) - 1};
+    }
 };
 
 // Numbers are found on disk, so they do matter. Also, setting their sizes of
@@ -477,6 +493,16 @@ enum class scylla_metadata_type : uint32_t {
     Sharding = 1,
     Features = 2,
     ExtensionAttributes = 3,
+    RunIdentifier = 4,
+};
+
+struct run_identifier {
+    // UUID is used for uniqueness across nodes, such that an imported sstable
+    // will not have its run identifier conflicted with the one of a local sstable.
+    utils::UUID id;
+
+    template <typename Describer>
+    auto describe_type(sstable_version_types v, Describer f) { return f(id); }
 };
 
 struct scylla_metadata {
@@ -485,7 +511,8 @@ struct scylla_metadata {
     disk_set_of_tagged_union<scylla_metadata_type,
             disk_tagged_union_member<scylla_metadata_type, scylla_metadata_type::Sharding, sharding_metadata>,
             disk_tagged_union_member<scylla_metadata_type, scylla_metadata_type::Features, sstable_enabled_features>,
-            disk_tagged_union_member<scylla_metadata_type, scylla_metadata_type::ExtensionAttributes, extension_attributes>
+            disk_tagged_union_member<scylla_metadata_type, scylla_metadata_type::ExtensionAttributes, extension_attributes>,
+            disk_tagged_union_member<scylla_metadata_type, scylla_metadata_type::RunIdentifier, run_identifier>
             > data;
 
     bool has_feature(sstable_feature f) const {
@@ -502,6 +529,10 @@ struct scylla_metadata {
             ext = data.get<scylla_metadata_type::ExtensionAttributes, extension_attributes>();
         }
         return *ext;
+    }
+    stdx::optional<utils::UUID> get_optional_run_identifier() const {
+        auto* m = data.get<scylla_metadata_type::RunIdentifier, run_identifier>();
+        return m ? stdx::make_optional(m->id) : stdx::nullopt;
     }
 
     template <typename Describer>
@@ -538,7 +569,7 @@ inline bool is_expired_liveness_ttl(uint32_t ttl) {
 }
 
 struct statistics {
-    disk_hash<uint32_t, metadata_type, uint32_t> hash;
+    disk_array<uint32_t, std::pair<metadata_type, uint32_t>> offsets; // ordered by metadata_type
     std::unordered_map<metadata_type, std::unique_ptr<metadata>> contents;
 };
 

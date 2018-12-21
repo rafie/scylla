@@ -7,6 +7,7 @@ print_usage() {
     echo "  --jobs  specify number of jobs"
     echo "  --clean clean build directory"
     echo "  --compiler  C++ compiler path"
+    echo "  --c-compiler C compiler path"
     echo "  --nodeps    skip installing dependencies"
     exit 1
 }
@@ -14,6 +15,7 @@ print_usage() {
 JOBS=
 CLEAN=
 COMPILER=
+CCOMPILER=
 NODEPS=
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -27,6 +29,10 @@ while [ $# -gt 0 ]; do
             ;;
         "--compiler")
             COMPILER=$2
+            shift 2
+            ;;
+        "--c-compiler")
+            CCOMPILER=$2
             shift 2
             ;;
         "--nodeps")
@@ -52,15 +58,6 @@ if [ ! -e reloc/build_reloc.sh ]; then
     exit 1
 fi
 
-NINJA=$(which ninja-build) &&:
-if [ -z "$NINJA" ]; then
-    NINJA=$(which ninja) &&:
-fi
-if [ -z "$NINJA" ]; then
-    echo "ninja not found."
-    exit 1
-fi
-
 if [ "$CLEAN" = "yes" ]; then
     rm -rf build
 fi
@@ -73,9 +70,21 @@ if [ -z "$NODEPS" ]; then
     sudo ./install-dependencies.sh
 fi
 
+NINJA=$(which ninja-build) &&:
+if [ -z "$NINJA" ]; then
+    NINJA=$(which ninja) &&:
+fi
+if [ -z "$NINJA" ]; then
+    echo "ninja not found."
+    exit 1
+fi
+
 FLAGS="--with=scylla --with=iotune --mode=release"
 if [ -n "$COMPILER" ]; then
     FLAGS="$FLAGS --compiler $COMPILER"
+fi
+if [ -n "$CCOMPILER" ]; then
+    FLAGS="$FLAGS --c-compiler $CCOMPILER"
 fi
 ./configure.py $FLAGS
 $NINJA $JOBS build/release/scylla-package.tar.gz

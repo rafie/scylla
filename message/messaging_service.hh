@@ -23,11 +23,11 @@
 
 #include "messaging_service_fwd.hh"
 #include "msg_addr.hh"
-#include "core/reactor.hh"
-#include "core/distributed.hh"
-#include "core/sstring.hh"
+#include <seastar/core/reactor.hh>
+#include <seastar/core/distributed.hh>
+#include <seastar/core/sstring.hh>
 #include "gms/inet_address.hh"
-#include "rpc/rpc_types.hh"
+#include <seastar/rpc/rpc_types.hh>
 #include <unordered_map>
 #include "query-request.hh"
 #include "mutation_query.hh"
@@ -36,6 +36,7 @@
 #include "tracing/tracing.hh"
 #include "digest_algorithm.hh"
 #include "streaming/stream_reason.hh"
+#include "cache_temperature.hh"
 
 #include <seastar/net/tls.hh>
 
@@ -56,6 +57,10 @@ namespace utils {
 
 namespace db {
 class seed_provider_type;
+}
+
+namespace db::view {
+class update_backlog;
 }
 
 class frozen_mutation;
@@ -317,14 +322,14 @@ public:
     future<> send_counter_mutation(msg_addr id, clock_type::time_point timeout, std::vector<frozen_mutation> fms, db::consistency_level cl, stdx::optional<tracing::trace_info> trace_info = std::experimental::nullopt);
 
     // Wrapper for MUTATION_DONE
-    void register_mutation_done(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id)>&& func);
+    void register_mutation_done(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id, rpc::optional<db::view::update_backlog> backlog)>&& func);
     void unregister_mutation_done();
-    future<> send_mutation_done(msg_addr id, unsigned shard, response_id_type response_id);
+    future<> send_mutation_done(msg_addr id, unsigned shard, response_id_type response_id, db::view::update_backlog backlog);
 
     // Wrapper for MUTATION_FAILED
-    void register_mutation_failed(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id, size_t num_failed)>&& func);
+    void register_mutation_failed(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id, size_t num_failed, rpc::optional<db::view::update_backlog> backlog)>&& func);
     void unregister_mutation_failed();
-    future<> send_mutation_failed(msg_addr id, unsigned shard, response_id_type response_id, size_t num_failed);
+    future<> send_mutation_failed(msg_addr id, unsigned shard, response_id_type response_id, size_t num_failed, db::view::update_backlog backlog);
 
     // Wrapper for READ_DATA
     // Note: WTH is future<foreign_ptr<lw_shared_ptr<query::result>>

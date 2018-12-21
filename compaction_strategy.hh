@@ -61,6 +61,8 @@ public:
     // Return a list of sstables to be compacted after applying the strategy.
     compaction_descriptor get_sstables_for_compaction(column_family& cfs, std::vector<shared_sstable> candidates);
 
+    compaction_descriptor get_major_compaction_job(column_family& cf, std::vector<shared_sstable> candidates);
+
     std::vector<resharding_descriptor> get_resharding_jobs(column_family& cf, std::vector<shared_sstable> candidates);
 
     // Some strategies may look at the compacted and resulting sstables to
@@ -72,6 +74,9 @@ public:
 
     // Return if optimization to rule out sstables based on clustering key filter should be applied.
     bool use_clustering_key_filter() const;
+
+    // Return true if compaction strategy ignores sstables coming from partial runs.
+    bool ignore_partial_runs() const;
 
     // An estimation of number of compaction for strategy to be satisfied.
     int64_t estimated_pending_compactions(column_family& cf) const;
